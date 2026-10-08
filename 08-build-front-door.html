@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>08 · Build Part 2: The Front Door</title>
-<meta name="description" content="Renting the smallest VPS that allows port 25, forwarding mail over Tailscale to Stalwart at home with HAProxy, relaying outbound through Postfix, and sending the first real message.">
+<title>08 · Build Part 2: The Free Front Door, As Built</title>
+<meta name="description" content="The afternoon of 8 October 2026, step by step: JMAP through the tunnel, the Email Worker, Resend, the MX handover to Cloudflare Email Routing, and the first messages in both directions.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,453 +20,265 @@
 
 <main>
 <header class="hero">
-  <div class="kicker">Part 08 · Build, part 2</div>
-  <h1>Build Part 2: The Front Door</h1>
-  <p class="lead">Part 07 left me with a working mail server that only my own devices could reach over Tailscale. This part gives it a public IP: a rented VPS that does nothing except accept mail connections on behalf of <code>srv1</code> and send my outbound mail from an address the rest of the internet will trust.</p>
-  <div class="meta">Two machines, two terminals open side by side. Expect two to three hours, most of it waiting for DNS and a support ticket.</div>
+  <div class="kicker">Part 08 · The build</div>
+  <h1>Build Part 2: The Free Front Door, As Built</h1>
+  <p class="lead">Part 07 ended at lunchtime with a mail server that could only talk to itself. By six in the evening it had received a message from Gmail and sent one back, without a VPS, without a port open at home, and without a bill. This is what happened in between, in order, with the evidence.</p>
+  <div class="meta">Written after the build on 8 October 2026 from the build log in <code>notes/</code>. The earlier version of this page, a plan for a rented VPS, was never executed; part 05 explains why.</div>
 </header>
 
-<div class="callout warn"><div class="label">Written before the build</div>
-<p>This page is the plan, written down <em>before</em> I did it, the way I wish the other guides had started. Once the build is done I will come back and correct whatever turned out to be wrong, and keep the wrong turns in. If a step reads too cleanly, assume it has not been tested yet.</p></div>
+<div class="callout tip"><div class="label">Written afterwards</div>
+<p>Everything on this page was done. Where a step went wrong first, the wrong turn is kept. Times are South African time unless marked UTC, which is what Stalwart's log uses.</p></div>
 
-<section id="vps">
-<h2><span class="num">1.</span> Choosing the VPS</h2>
-<p>There are exactly two things this machine must have, and most of the cheap-VPS market fails at least one of them:</p>
-<ol>
-  <li><strong>Port 25 open, inbound and outbound.</strong> Inbound so other mail servers can reach HAProxy. Outbound so Postfix can deliver to them. Many providers block 25 by default to stop spam from freshly created accounts, and some never unblock it.</li>
-  <li><strong>An editable PTR record.</strong> I need to set the reverse DNS of the public IP to <code>mail.22112002.xyz</code> myself, from the provider's console. If the provider has to do it by ticket, that is acceptable. If they will not do it at all, that provider is out.</li>
-</ol>
-<p>Beyond that: a dedicated IPv4 address (not shared, not NAT), the smallest tier they sell, and a Debian 12 or 13 image. HAProxy, Postfix and Tailscale together idle at well under 200 MB, so RAM is irrelevant here.</p>
-<table>
-<thead><tr><th>Provider</th><th>Port 25</th><th>PTR</th><th>Notes</th></tr></thead>
-<tbody>
-<tr><td>Hetzner</td><td>Blocked on new accounts until you open a support ticket, normally only after the first paid invoice</td><td>Editable in the Cloud console</td><td>About €4–5/month for the smallest box. Plan for the ticket delay.</td></tr>
-<tr><td>Contabo</td><td>Open</td><td>Editable in the customer panel</td><td>Similar price. Support is slower; the IP ranges have a mixed reputation history, so check the blacklists before relying on it.</td></tr>
-<tr><td>OVH</td><td>Open</td><td>Editable in the manager</td><td>Similar price.</td></tr>
-<tr><td>DigitalOcean</td><td>Blocked permanently for new accounts</td><td>Via the droplet's hostname</td><td>Not usable for this design.</td></tr>
-<tr><td>Oracle Cloud, AWS, GCP</td><td>Blocked, unblocking is hard or impossible</td><td>Varies</td><td>Avoid. These expect you to use their own mail-sending services.</td></tr>
-</tbody>
-</table>
-<div class="callout tip"><div class="label">Before paying</div>
-<p>Send the provider's support two questions in one message: "Is outbound and inbound TCP port 25 allowed on your smallest VPS, and can I set the PTR record for its IPv4 address myself?" Their answer is the deciding fact. A provider that answers yes to both in writing has just saved me from the Oracle trap.</p></div>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li>A VPS exists with a dedicated public IPv4 address. I will call it <code>&lt;vps-public-ip&gt;</code> everywhere below.</li>
-  <li>Written confirmation (or a provider policy page) that port 25 is or will be open, and that PTR is editable.</li>
-  <li>Root or sudo login works over SSH.</li>
-</ul></div>
-</section>
-
-<section id="harden">
-<h2><span class="num">2.</span> First login, hardening, Tailscale, firewall</h2>
-<p>This box is going to sit on a public IP with ports open to the whole internet. The first fifteen minutes are the same as for any public server, and I am not skipping them because "it only runs HAProxy".</p>
-<pre><code># As root on the fresh VPS
-apt update &amp;&amp; apt upgrade -y
-adduser oll
-usermod -aG sudo oll
-
-# From the laptop: copy the SSH key, then log in as the new user and confirm sudo works
-ssh-copy-id oll@&lt;vps-public-ip&gt;
-ssh oll@&lt;vps-public-ip&gt; sudo -v</code></pre>
-<p>Once key login works, turn off passwords. Edit <code>/etc/ssh/sshd_config</code> (or a file under <code>sshd_config.d/</code>) so these two lines are set, then restart SSH <em>while keeping the current session open</em> and test a second login before closing the first.</p>
-<pre><code>PasswordAuthentication no
-PermitRootLogin no</code></pre>
-<pre><code>sudo sshd -t &amp;&amp; sudo systemctl restart ssh</code></pre>
-<p>Then join the VPS to the Tailscale mesh. It is the same two commands as every other machine in the homelab, and the same account.</p>
-<pre><code>curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-tailscale ip -4        # note this: it is &lt;vps-tailscale-ip&gt; below
-tailscale status       # srv1 (100.72.72.58) should be listed</code></pre>
-<p>From here on I SSH to the VPS over Tailscale, not over the public IP. That lets the firewall close public SSH entirely: the only things the internet can reach are the three mail ports.</p>
-<p>I used <code>ufw</code> here because it reads well in a guide. It is a front-end to nftables; if you prefer writing <code>/etc/nftables.conf</code> directly, the rules are the same four ideas: allow mail ports on the public interface, allow Tailscale's UDP port, allow everything on <code>tailscale0</code>, drop the rest.</p>
-<pre><code>sudo apt install -y ufw
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow in on tailscale0            # SSH, Postfix, everything: Tailscale only
-sudo ufw allow 41641/udp                   # Tailscale's own port, so it can connect directly
-sudo ufw allow 25/tcp
-sudo ufw allow 465/tcp
-sudo ufw allow 993/tcp
-# sudo ufw allow 587/tcp                   # optional: STARTTLS submission, I am using 465 only
-sudo ufw enable
-sudo ufw status verbose</code></pre>
-<div class="callout danger"><div class="label">Do this in the right order</div>
-<p>Confirm <code>ssh oll@&lt;vps-tailscale-ip&gt;</code> works <em>before</em> enabling the firewall. Once ufw is on, public SSH is closed, and if Tailscale is not up you have locked yourself out and need the provider's web console.</p></div>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li><code>ssh oll@&lt;vps-tailscale-ip&gt;</code> works; <code>ssh oll@&lt;vps-public-ip&gt;</code> now times out.</li>
-  <li><code>tailscale status</code> on the VPS shows <code>srv1</code>; <code>tailscale ping 100.72.72.58</code> gets a direct reply.</li>
-  <li><code>sudo ufw status</code> lists 25, 465, 993, 41641/udp and <code>tailscale0</code>, nothing else.</li>
-</ul></div>
-</section>
-
-<section id="ptr">
-<h2><span class="num">3.</span> The PTR record</h2>
-<p>This is the one record I could never set from home, and the single biggest reason the VPS exists. In the provider's console, find the reverse DNS (rDNS, PTR) setting for <code>&lt;vps-public-ip&gt;</code> and set it to <code>mail.22112002.xyz</code>, with the trailing dot if the form wants one.</p>
-<pre><code>dig -x &lt;vps-public-ip&gt; +short
-# expected, after a few minutes:
-# mail.22112002.xyz.</code></pre>
-<p>Reverse DNS is published by the provider's name servers, not by Cloudflare, so Cloudflare has nothing to do with this step. Some providers refuse to set a PTR until the forward A record (next step) already exists and points at the IP. If the console rejects it, do step 4 first and come back.</p>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul><li><code>dig -x &lt;vps-public-ip&gt;</code> returns <code>mail.22112002.xyz.</code></li></ul></div>
-</section>
-
-<section id="dns">
-<h2><span class="num">4.</span> DNS on Cloudflare: the one record Stalwart does not write</h2>
-<p>In Part 07, Stalwart was given a Cloudflare API token and publishes the MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, CAA and autoconfig records for the domain itself. The one thing it cannot know is the public IP of a machine it has never heard of, so the A record for the mail host is mine to add.</p>
-<p>In the Cloudflare dashboard, DNS for <code>22112002.xyz</code>: add <strong>A</strong>, name <code>mail</code>, content <code>&lt;vps-public-ip&gt;</code>, proxy status <strong>DNS only</strong> (the grey cloud, not the orange one).</p>
-<div class="callout danger"><div class="label">Grey cloud, always</div>
-<p>Every other record in this zone is proxied, because that is how the tunnel works. This one must not be. A proxied record resolves to Cloudflare's IPs, which only speak HTTP; a mail server connecting to port 25 there gets nothing. Cloudflare knows this and shows a warning if an MX target is proxied. Heed it.</p></div>
-<p>Now the chain the rest of the world will follow should resolve end to end:</p>
-<pre><code>dig MX 22112002.xyz +short          # 10 mail.22112002.xyz.  (published by Stalwart)
-dig A mail.22112002.xyz +short      # &lt;vps-public-ip&gt;        (just added)
-dig -x &lt;vps-public-ip&gt; +short      # mail.22112002.xyz.     (step 3)</code></pre>
-<p>Forward and reverse now agree. That agreement is called <strong>forward-confirmed reverse DNS</strong> and it is one of the first things a receiving server checks about me, so it is worth seeing it with my own eyes before moving on.</p>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li>All three <code>dig</code> commands above return what the comments say, against <code>@1.1.1.1</code> as well as the local resolver.</li>
-  <li>The <code>mail</code> record in the Cloudflare dashboard shows a grey cloud.</li>
-</ul></div>
-</section>
-
-<section id="haproxy">
-<h2><span class="num">5.</span> HAProxy: the inbound forwarder</h2>
-<p>HAProxy's job here is deliberately dumb. It accepts a TCP connection on a public port and opens an identical TCP connection to <code>srv1</code> over Tailscale, copying bytes in both directions. It does not read the mail, does not terminate TLS, does not know what SMTP is. The one clever thing it does is prepend a <strong>PROXY protocol v2</strong> header on the connection to Stalwart, carrying the real client's IP, so that Stalwart's spam filter, SPF checks and rate limits see Gmail's address rather than the VPS's.</p>
-<pre><code>sudo apt install -y haproxy
-sudo cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.dist</code></pre>
-<p>Replace <code>/etc/haproxy/haproxy.cfg</code> with this:</p>
-<pre><code>global
-    log /dev/log local0
-    maxconn 2000
-    user haproxy
-    group haproxy
-    daemon
-
-defaults
-    log     global
-    mode    tcp
-    option  tcplog
-    option  dontlognull
-    timeout connect 10s
-    timeout client  5m
-    timeout server  5m
-
-# ---- SMTP, server to server -------------------------------------------
-frontend ft_smtp
-    bind &lt;vps-public-ip&gt;:25
-    default_backend bk_smtp
-
-backend bk_smtp
-    server srv1 100.72.72.58:25 send-proxy-v2 check
-
-# ---- Submission over implicit TLS, my own clients ----------------------
-frontend ft_smtps
-    bind &lt;vps-public-ip&gt;:465
-    default_backend bk_smtps
-
-backend bk_smtps
-    server srv1 100.72.72.58:465 send-proxy-v2 check
-
-# ---- IMAP over implicit TLS -------------------------------------------
-frontend ft_imaps
-    bind &lt;vps-public-ip&gt;:993
-    default_backend bk_imaps
-
-backend bk_imaps
-    server srv1 100.72.72.58:993 send-proxy-v2 check</code></pre>
-<p>Three things about those timeouts. IMAP clients hold a connection open and idle for a long time, so five minutes is the <em>minimum</em> that will not cause phones to reconnect constantly. <code>timeout connect</code> is about the hop to <code>srv1</code> over Tailscale, which should take milliseconds, so ten seconds is generous. And binding to <code>&lt;vps-public-ip&gt;</code> rather than <code>*</code> leaves the Tailscale interface free for Postfix to use port 25 in step 7.</p>
-<p>Validate before restarting. This is the lesson from the Caddy debugging session in the Homelab series: a config checker that runs in a second is worth more than a restart that fails in a way you then have to investigate.</p>
-<pre><code>sudo haproxy -c -f /etc/haproxy/haproxy.cfg
-# Configuration file is valid
-sudo systemctl restart haproxy
-sudo systemctl status haproxy --no-pager
-sudo ss -tlnp | grep haproxy</code></pre>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li><code>ss -tlnp</code> on the VPS shows haproxy on <code>&lt;vps-public-ip&gt;:25</code>, <code>:465</code> and <code>:993</code>.</li>
-  <li><code>journalctl -u haproxy</code> has no <code>DOWN</code> lines for <code>srv1</code>. If it does, HAProxy cannot reach <code>100.72.72.58</code>: check Tailscale on both ends first, then that Stalwart's listeners on srv1 are bound to the Tailscale IP (Part 07).</li>
-</ul></div>
-</section>
-
-<section id="proxy-trust">
-<h2><span class="num">6.</span> Stalwart: trust the PROXY header from the VPS</h2>
-<p>Stalwart will not believe a PROXY header from just anyone, because anyone who could send one could claim to be any IP they liked. It has to be told which addresses are allowed to speak for others. The setting is <code>proxyTrustedNetworks</code> server-wide, or <code>overrideProxyTrustedNetworks</code> on an individual listener, and the per-listener one replaces the server-wide list for that listener.</p>
-<p>I want the override, not the global setting, because only the three Tailscale-bound listeners sit behind HAProxy. The loopback listeners that Roundcube uses (Part 06) must keep treating connections as ordinary.</p>
-<p>In the WebUI, <strong>Settings › Network › Listeners</strong>: open each of the listeners bound to <code>100.72.72.58</code> (SMTP on 25, submissions on 465, IMAP on 993) and set its trusted proxy networks to the single entry <code>&lt;vps-tailscale-ip&gt;</code>. Save, then trigger a settings reload so the running listeners pick it up.</p>
-<div class="callout verify"><div class="label">Verify on the live UI</div>
-<p>The field names above come from the Stalwart 0.16 reference (<code>NetworkListener.overrideProxyTrustedNetworks</code>, <code>SystemSettings.proxyTrustedNetworks</code>). The exact label in the listener form and the location of the reload action may differ from this text. Use the global search box in the WebUI for "proxy" if it is not where I said.</p></div>
-<div class="callout warn"><div class="label">Expected breakage</div>
-<p>From this point on, those three listeners <em>expect</em> every connection from the VPS to begin with a PROXY header. The direct tests from Part 07, where the laptop connected straight to <code>100.72.72.58:993</code> over Tailscale, will now fail if the laptop's IP is in the trusted list (it is not), or succeed only because the laptop is untrusted and is treated as a normal client. Either way, the path that matters from now on is <code>mail.22112002.xyz:993</code> through HAProxy, and that is what I test.</p></div>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li>From the laptop, on mobile data: <code>openssl s_client -connect mail.22112002.xyz:993 -servername mail.22112002.xyz</code> shows the Let's Encrypt certificate from Part 07 and an IMAP greeting.</li>
-  <li>In Stalwart's live view or <code>journalctl -u stalwart</code>, the connection is logged with the laptop's <em>public</em> IP, not <code>&lt;vps-tailscale-ip&gt;</code>. That line is the proof the PROXY header is being read.</li>
-</ul></div>
-</section>
-
-<section id="postfix">
-<h2><span class="num">7.</span> Postfix: the outbound relay</h2>
-<p>Inbound is solved. Outbound needs the mirror image: mail from Stalwart has to leave the internet from <code>&lt;vps-public-ip&gt;</code>, so that the IP Gmail sees has the PTR I set and is not a residential address. HAProxy cannot do that; it forwards connections <em>to</em> somewhere, it does not originate SMTP sessions. Postfix can, and configured as a relay-only host it is about twenty lines.</p>
-<pre><code>sudo apt install -y postfix
-# In the installer dialog pick "No configuration". We write main.cf by hand.
-sudo mv /etc/postfix/main.cf /etc/postfix/main.cf.dist 2&gt;/dev/null</code></pre>
-<p><code>/etc/postfix/main.cf</code>:</p>
-<pre><code># Identity. Must match the PTR and the A record exactly.
-myhostname = mail.22112002.xyz
-smtp_helo_name = $myhostname
-
-# Listen only where srv1 can reach me: Tailscale and loopback. Never the public IP.
-inet_interfaces = &lt;vps-tailscale-ip&gt;, 127.0.0.1
-inet_protocols = ipv4
-
-# This box delivers nothing locally. Every message is for somewhere else.
-mydestination =
-local_recipient_maps =
-local_transport = error:local delivery disabled
-
-# Who may relay through me: myself, and srv1. Nobody else.
-mynetworks = 127.0.0.0/8 100.72.72.58/32
-smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination
-
-# Outbound TLS: use it when the other side offers it.
-smtp_tls_security_level = may
-smtp_tls_loglevel = 1
-
-# One log file I can tail.
-maillog_file = /var/log/postfix.log</code></pre>
-<pre><code>sudo postfix check
-sudo systemctl restart postfix
-sudo ss -tlnp | grep master     # expect &lt;vps-tailscale-ip&gt;:25 and 127.0.0.1:25, nothing public</code></pre>
-<div class="callout danger"><div class="label">Open relay check, do it now</div>
-<p>An open relay is a mail server that will send anyone's mail to anyone. Spammers find them in hours, and once a relay has been abused the IP's reputation is gone, which defeats the entire purpose of the VPS. Two lines guard against it here: <code>inet_interfaces</code> keeps Postfix off the public IP entirely, and <code>mynetworks</code> plus <code>reject_unauth_destination</code> means even a connection from inside Tailscale is refused unless it comes from <code>srv1</code>. Prove both:</p>
-<pre><code># From the laptop, on mobile data. HAProxy owns public 25, so you should see Stalwart's
-# banner (via srv1), never Postfix's. Postfix must not be reachable here at all.
-nc -v &lt;vps-public-ip&gt; 25
-
-# From srv1, over Tailscale: this one IS Postfix.
-nc -v &lt;vps-tailscale-ip&gt; 25
-# 220 mail.22112002.xyz ESMTP Postfix
-
-# From the laptop over Tailscale (not in mynetworks): connect, then try to relay.
-# Expect "454 4.7.1 ... Relay access denied" on the RCPT TO.
-nc -v &lt;vps-tailscale-ip&gt; 25</code></pre></div>
-<p>Note that the two banners on port 25 are different programs. On the public IP it is Stalwart, reached through HAProxy. On the Tailscale IP it is Postfix. Same port, two listeners, two interfaces, which is exactly why step 5 bound HAProxy to the public address only.</p>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li><code>postfix check</code> prints nothing.</li>
-  <li>Postfix is listening on <code>&lt;vps-tailscale-ip&gt;:25</code> and <code>127.0.0.1:25</code> only.</li>
-  <li>A relay attempt from an address that is not <code>100.72.72.58</code> is refused with <code>Relay access denied</code>.</li>
-</ul></div>
-</section>
-
-<section id="route">
-<h2><span class="num">8.</span> Stalwart: send everything remote through the relay</h2>
-<p>By default Stalwart delivers like any MTA: look up the recipient domain's MX and connect to it directly. From <code>srv1</code> that would go out over my home connection, which is the thing Part 01 explained will not work. So I give it a route that points at Postfix instead, and tell its outbound strategy to use that route for every remote recipient.</p>
-<p>In the WebUI, <strong>Settings › MTA › Outbound › Routes</strong>: add a route of type <strong>Relay</strong> with these values.</p>
-<table>
-<thead><tr><th>Field</th><th>Value</th><th>Why</th></tr></thead>
-<tbody>
-<tr><td><code>name</code></td><td><code>relay</code></td><td>What the strategy refers to.</td></tr>
-<tr><td><code>address</code></td><td><code>&lt;vps-tailscale-ip&gt;</code></td><td>Postfix's Tailscale-side listener. The IP, not <code>mail.22112002.xyz</code>, which would resolve to the public IP and reach HAProxy instead.</td></tr>
-<tr><td><code>port</code></td><td><code>25</code></td><td>Where Postfix listens.</td></tr>
-<tr><td><code>protocol</code></td><td><code>smtp</code></td><td>Postfix speaks SMTP, not LMTP.</td></tr>
-<tr><td><code>implicitTls</code></td><td><code>false</code></td><td>Plain connection, STARTTLS if offered. The wire is already WireGuard inside Tailscale, so this is encrypted regardless.</td></tr>
-<tr><td><code>authSecret</code></td><td>None</td><td>Postfix trusts srv1 by IP via <code>mynetworks</code>; no password needed.</td></tr>
-</tbody>
-</table>
-<p>The equivalent object, for anyone scripting this with the CLI instead of clicking:</p>
-<pre><code>{
-  "@type": "Relay",
-  "name": "relay",
-  "address": "&lt;vps-tailscale-ip&gt;",
-  "port": 25,
-  "protocol": "smtp",
-  "implicitTls": false,
-  "allowInvalidCerts": false,
-  "authSecret": {"@type": "None"}
+<section id="jmap">
+<h2><span class="num">1.</span> JMAP, autoconfig and MTA-STS through the tunnel (14:40)</h2>
+<p>First the part that did not depend on anyone else's account: publishing Stalwart's HTTP side the same way every website is published. One env line, one Caddy block, four tunnel routes.</p>
+<pre><code>echo 'STALWART_PUBLIC_URL=https://mail.22112002.xyz' | sudo tee -a /etc/stalwart/stalwart.env
+sudo systemctl restart stalwart</code></pre>
+<pre><code># appended to /etc/caddy/Caddyfile
+mail.22112002.xyz:80, mta-sts.22112002.xyz:80, autoconfig.22112002.xyz:80, autodiscover.22112002.xyz:80 {
+	@admin path /admin /admin/*
+	respond @admin 403
+	reverse_proxy 127.0.0.1:8080
 }</code></pre>
-<p>Then <strong>Settings › MTA › Outbound › Strategies</strong>: the outbound strategy decides, per recipient, which route to use. Local domains must keep being delivered locally; everything else must pick <code>relay</code>.</p>
-<div class="callout verify"><div class="label">Expression syntax to confirm on the UI</div>
-<p>The strategy's route is chosen by an expression that can branch on things like whether the recipient domain is local. I know the shape (local stays local, otherwise <code>relay</code>) but not the exact expression text in 0.16, and I am not going to guess it in a guide. Read the form's inline help, or the expressions page in the docs, and write down what actually worked here.</p></div>
-<div class="checkpoint"><div class="label">Checkpoint</div>
+<pre><code>sudo caddy validate --config /etc/caddy/Caddyfile &amp;&amp; sudo systemctl reload caddy
+for h in mail mta-sts autoconfig autodiscover; do
+  cloudflared tunnel route dns --overwrite-dns 0cf125dc-378c-4af2-83e3-d58df0fbed3f $h.22112002.xyz
+done
+# four ingress lines added above the http_status:404 catch-all, then:
+sudo systemctl restart cloudflared</code></pre>
+<p><code>--overwrite-dns</code> mattered: Stalwart's automatic DNS had already created <code>mta-sts</code>, <code>autoconfig</code> and <code>autodiscover</code> as CNAMEs to <code>mail.22112002.xyz</code>, and the tunnel route replaced them with proxied tunnel records. Stalwart did not put them back during the day.</p>
+<div class="checkpoint"><div class="label">Checkpoint · from the laptop, over the public internet</div>
 <ul>
-  <li>The route <code>relay</code> exists and points at <code>&lt;vps-tailscale-ip&gt;:25</code>.</li>
-  <li>Sending from one local account to another (Part 07's test) still works; that proves local delivery was not accidentally routed to Postfix, which would bounce it with <code>local delivery disabled</code>.</li>
+  <li><code>https://mail.22112002.xyz/.well-known/jmap</code> → 307 to <code>/jmap/session</code>, which returned 200 with the JMAP capabilities JSON</li>
+  <li><code>https://mail.22112002.xyz/admin</code> → 403</li>
+  <li><code>https://mta-sts.22112002.xyz/.well-known/mta-sts.txt</code> → 200, <code>mode: testing</code></li>
+  <li><code>https://autoconfig.22112002.xyz/mail/config-v1.1.xml?emailaddress=olwethu@22112002.xyz</code> → 200, the client-config XML</li>
 </ul></div>
+<p>One thing I noted and left: the MTA-STS policy says <code>mx: mail.22112002.xyz</code>, generated by Stalwart from its own idea of the MX. Once Cloudflare owns the MX that line is wrong. In <code>testing</code> mode a wrong policy does no harm, and the <code>_mta-sts</code> TXT was removed later in the afternoon anyway, so senders no longer look for it.</p>
 </section>
 
-<section id="first-message">
-<h2><span class="num">9.</span> The first real message</h2>
-<p>Two terminals, one on each machine, before pressing send:</p>
-<pre><code># srv1
-sudo journalctl -u stalwart -f
-
-# VPS
-sudo tail -f /var/log/postfix.log</code></pre>
-<p>Then, in Roundcube, send a short message from <code>me@22112002.xyz</code> to a Gmail address I own. What I expect to see, in order: Stalwart accepts the submission, signs it with DKIM, queues it, connects to the relay. Postfix logs the connection from <code>100.72.72.58</code>, then an outbound connection to a Google MX host, then <code>status=sent (250 2.0.0 OK ...)</code>.</p>
-<p>In Gmail, open the message, then the three-dot menu, then <strong>Show original</strong>. This page is the receiving side's verdict and it is worth reading slowly the first time:</p>
-<ul>
-  <li><strong>SPF: PASS</strong> with IP <code>&lt;vps-public-ip&gt;</code>. The IP must be the VPS. If it is a residential address, the route in step 8 is not being used.</li>
-  <li><strong>DKIM: PASS</strong> with domain <code>22112002.xyz</code>. Signed at home by Stalwart, verified against the public key Stalwart published to Cloudflare.</li>
-  <li><strong>DMARC: PASS</strong>, because at least one of the two above passed <em>and</em> aligned with the From domain.</li>
-  <li>In the raw headers, the topmost <code>Received:</code> line written by Google should name <code>mail.22112002.xyz</code> and <code>&lt;vps-public-ip&gt;</code>, which is the FCrDNS pair from step 4 doing its job.</li>
-</ul>
-<p>Now reply from Gmail. This time watch HAProxy as well: <code>sudo journalctl -u haproxy -f</code> on the VPS logs a connection from one of Google's IPs to <code>ft_smtp</code>, handed to <code>bk_smtp</code>. A moment later Stalwart's log on <code>srv1</code> shows the <em>same Google IP</em> as the client. That is the PROXY protocol working: without it, Stalwart would see <code>&lt;vps-tailscale-ip&gt;</code> and every SPF and DNSBL check it does on inbound mail would be checking the wrong address.</p>
-
-<figure>
-<svg viewBox="0 0 960 330" role="img" aria-label="Inbound message path with the log line expected at each hop: Gmail connects to the VPS public IP on port 25, HAProxy logs the Google IP and backend bk_smtp, forwards over Tailscale with a PROXY header to Stalwart on srv1, whose log shows the same Google IP, then the message lands in the mailbox and Roundcube shows it.">
-  <rect x="20" y="40" width="170" height="70" class="box"/>
-  <text x="35" y="65">Gmail's MX</text>
-  <text x="35" y="83" class="muted">looks up MX, connects</text>
-  <text x="35" y="99" class="mono">→ &lt;vps-public-ip&gt;:25</text>
-
-  <rect x="250" y="40" width="200" height="70" class="box"/>
-  <text x="265" y="65">HAProxy on the VPS</text>
-  <text x="265" y="83" class="muted">TCP mode, adds PROXY v2</text>
-  <text x="265" y="99" class="mono">ft_smtp → bk_smtp</text>
-
-  <rect x="520" y="40" width="200" height="70" class="box"/>
-  <text x="535" y="65">Stalwart on srv1</text>
-  <text x="535" y="83" class="muted">reads PROXY, checks SPF/DNSBL</text>
-  <text x="535" y="99" class="mono">100.72.72.58:25</text>
-
-  <rect x="780" y="40" width="160" height="70" class="box"/>
-  <text x="795" y="65">Mailbox</text>
-  <text x="795" y="83" class="muted">Roundcube over</text>
-  <text x="795" y="99" class="muted">loopback IMAP</text>
-
-  <path d="M190 75 H250" class="edge ok" marker-end="url(#a)"/>
-  <text x="196" y="67" class="muted">public</text>
-  <path d="M450 75 H520" class="edge ts" marker-end="url(#a)"/>
-  <text x="456" y="67" class="muted secc">Tailscale</text>
-  <path d="M720 75 H780" class="edge" marker-end="url(#a)"/>
-
-  <!-- log lines -->
-  <rect x="20" y="140" width="920" height="170" class="box2"/>
-  <text x="35" y="165" class="title">What each log should say about the same connection</text>
-  <text x="35" y="195" class="mono muted">VPS   journalctl -u haproxy</text>
-  <text x="330" y="195" class="mono">142.250.x.x:41822 [..] ft_smtp bk_smtp/srv1 ...</text>
-  <text x="35" y="225" class="mono muted">srv1  journalctl -u stalwart</text>
-  <text x="330" y="225" class="mono">smtp connection from 142.250.x.x  (not &lt;vps-tailscale-ip&gt;)</text>
-  <text x="35" y="255" class="mono muted">srv1  stalwart, same session</text>
-  <text x="330" y="255" class="mono">spf=pass dkim=pass ... delivered to me@22112002.xyz</text>
-  <text x="35" y="285" class="mono muted">browser  Roundcube</text>
-  <text x="330" y="285" class="mono">new message in INBOX</text>
-  <text x="35" y="300" class="muted">If the second line shows the Tailscale IP instead of Google's, the PROXY header is not being sent or not being trusted.</text>
-  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
-</svg>
-<figcaption>One inbound message, four hops, and the one log line per hop that proves it passed through. The client IP should be identical in the HAProxy line and the Stalwart line.</figcaption>
-</figure>
-
-<figure>
-<svg viewBox="0 0 960 360" role="img" aria-label="Outbound message path as a triangle of three DNS facts that must agree: the PTR of the VPS IP names mail.22112002.xyz, the A record of mail.22112002.xyz is the VPS IP, and the SPF record says mx, which points at that same host. The message travels from Stalwart over Tailscale to Postfix on the VPS and out to Gmail.">
-  <!-- path along the bottom -->
-  <rect x="20" y="270" width="180" height="60" class="box"/>
-  <text x="35" y="293">Stalwart on srv1</text>
-  <text x="35" y="311" class="muted">signs with DKIM, queues</text>
-  <rect x="300" y="270" width="200" height="60" class="box"/>
-  <text x="315" y="293">Postfix on the VPS</text>
-  <text x="315" y="311" class="mono">HELO mail.22112002.xyz</text>
-  <rect x="620" y="270" width="180" height="60" class="box"/>
-  <text x="635" y="293">Gmail's MX</text>
-  <text x="635" y="311" class="muted">checks the triangle</text>
-  <path d="M200 300 H300" class="edge ts" marker-end="url(#a)"/>
-  <text x="212" y="292" class="muted secc">Tailscale, :25</text>
-  <path d="M500 300 H620" class="edge ok" marker-end="url(#a)"/>
-  <text x="520" y="292" class="muted">from &lt;vps-public-ip&gt;</text>
-
-  <!-- triangle -->
-  <rect x="380" y="20" width="200" height="56" class="box"/>
-  <text x="395" y="43" class="accent">A record</text>
-  <text x="395" y="61" class="mono">mail.22112002.xyz → &lt;vps-public-ip&gt;</text>
-
-  <rect x="120" y="150" width="220" height="56" class="box"/>
-  <text x="135" y="173" class="accent">PTR record</text>
-  <text x="135" y="191" class="mono">&lt;vps-public-ip&gt; → mail.22112002.xyz</text>
-
-  <rect x="620" y="150" width="220" height="56" class="box"/>
-  <text x="635" y="173" class="accent">SPF record</text>
-  <text x="635" y="191" class="mono">v=spf1 mx -all</text>
-
-  <path d="M400 76 L300 150" class="edge ok" marker-end="url(#a)"/>
-  <path d="M340 178 H620" class="edge ok" marker-end="url(#a)"/>
-  <path d="M700 150 L560 76" class="edge ok" marker-end="url(#a)"/>
-  <text x="300" y="120" class="muted good">forward and reverse agree</text>
-  <text x="400" y="200" class="muted good">"mx" names the same host, so the same IP</text>
-  <text x="590" y="120" class="muted good">MX → A → the connecting IP</text>
-
-  <path d="M710 270 V206" class="edge" marker-end="url(#a)"/>
-  <text x="716" y="245" class="muted">looks up all three</text>
-  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
-</svg>
-<figcaption>Outbound deliverability is three DNS facts that must point at each other. Break any one side of the triangle and Gmail's "Show original" will tell you which.</figcaption>
-</figure>
+<section id="worker">
+<h2><span class="num">2.</span> The Worker: clone, log in, point at the tunnel (14:45)</h2>
+<pre><code>cd ~/Projects/mailserver
+git clone https://github.com/Lumysia/email-smtp-bridge.git worker
+cd worker &amp;&amp; rm -rf .git .github &amp;&amp; npm install
+npx wrangler --version      # 4.148.0</code></pre>
+<p>Two edits in <code>wrangler.jsonc</code>: the name became <code>mail-inbound-bridge</code>, the <code>tunnel_id</code> became my homelab tunnel's, and <code>SMTP_ADDRESS</code> became <code>127.0.0.1:25</code>, because the connection will come out of <code>cloudflared</code> on <code>srv1</code> and loopback there is Stalwart. <code>npx tsc --noEmit</code> passed.</p>
+<p>Then <code>npx wrangler login</code>. This one has to be run in a real terminal window: it opens the browser for Cloudflare's consent screen and waits on a local port for the callback. Run from a non-interactive prompt it just hangs. Logged in, <code>npx wrangler whoami</code> showed the account.</p>
 <div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li>Gmail's "Show original" shows SPF, DKIM and DMARC all PASS and the connecting IP is <code>&lt;vps-public-ip&gt;</code>.</li>
-  <li>A reply from Gmail lands in Roundcube, and Stalwart's log records Google's IP, not the VPS's.</li>
-</ul></div>
+<ul><li><code>npx wrangler whoami</code> → "You are logged in with an OAuth Token" and the account ID</li><li><code>npx tsc --noEmit</code> → no output</li></ul></div>
 </section>
 
-<section id="deliverability">
-<h2><span class="num">10.</span> Deliverability checks</h2>
-<p>Gmail passing is a good sign, not a certificate. Three external checkers, each for a different thing:</p>
-<ul>
-  <li><strong>mail-tester.com</strong> gives a one-time address; send it a message from Roundcube with a real subject and a couple of sentences of real text, then read the score. Aim for 10/10. The deductions I expect to be chasing: a missing <code>List-Unsubscribe</code> header (ignore it for personal mail), a message body that is too short or looks like a test (write more), the IP not being in any of their reputation databases yet (only time fixes that), and anything about SPF or DKIM, which means going back to step 9.</li>
-  <li><strong>mxtoolbox.com</strong>: run the MX lookup, the SMTP diagnostics on <code>mail.22112002.xyz</code>, and above all the <strong>blacklist</strong> check on <code>&lt;vps-public-ip&gt;</code>. A freshly rented IP can be on a list because of its previous tenant. If it is, request delisting from each list, or ask the provider for a different IP before building anything else on this one.</li>
-  <li><strong>learndmarc.com</strong>: send it a message and it walks through the SPF, DKIM and DMARC evaluation step by step, showing exactly which record it fetched and what it concluded. The best tool I found for understanding a failure rather than just seeing one.</li>
-</ul>
-<div class="checkpoint"><div class="label">Checkpoint</div>
-<ul>
-  <li>mail-tester at or near 10/10, with any remaining deduction understood and written down.</li>
-  <li><code>&lt;vps-public-ip&gt;</code> is on no blacklist MXToolbox checks.</li>
-</ul></div>
-</section>
-
-<section id="clients">
-<h2><span class="num">11.</span> Phone and Thunderbird</h2>
-<p>With the front door open, ordinary mail clients work from anywhere, over the public hostname. The settings are the same everywhere:</p>
+<section id="resend">
+<h2><span class="num">3.</span> Resend: the domain and the key (14:37 to 14:50)</h2>
+<p>Sign up, <strong>Domains</strong>, <strong>Add Domain</strong>, <code>22112002.xyz</code>, region <code>eu-west-1</code>. The record set Resend showed was not the one I had written into the plan. It was:</p>
 <table>
-<thead><tr><th></th><th>Server</th><th>Port</th><th>Security</th><th>Login</th></tr></thead>
+<thead><tr><th>Type</th><th>Name</th><th>Value</th><th>Purpose</th></tr></thead>
 <tbody>
-<tr><td>Incoming (IMAP)</td><td><code>mail.22112002.xyz</code></td><td>993</td><td>SSL/TLS (implicit)</td><td>full address, normal password</td></tr>
-<tr><td>Outgoing (SMTP)</td><td><code>mail.22112002.xyz</code></td><td>465</td><td>SSL/TLS (implicit)</td><td>full address, normal password</td></tr>
+<tr><td>TXT</td><td><code>resend._domainkey</code></td><td><code>p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCufRNS…</code></td><td>DKIM key, "Enable Sending"</td></tr>
+<tr><td>CNAME</td><td><code>rsend</code></td><td><code>rsend-euw1.forge.rmta.net</code></td><td>SPF, "Enable Sending"</td></tr>
+<tr><td>CNAME</td><td><code>send</code></td><td><code>send.forge.rmta.net</code></td><td>"Enable Receiving", not needed here</td></tr>
 </tbody>
 </table>
-<p>Thunderbird should not even need the table. Stalwart publishes the autoconfig and autodiscover records to Cloudflare (Part 07), so entering the address and password should fill the servers in. If it does not, fall back to the table and check the autoconfig records with <code>dig</code> later; it is a convenience, not a dependency.</p>
+<p>Because the domain was on Cloudflare and I had picked Cloudflare as the provider, Resend's integration wrote all three records into the zone itself. By the time I checked from the laptop they were already answering. The dashboard said "pending" for a few minutes and then verified.</p>
+<p><strong>API Keys</strong>, <strong>Create API Key</strong>: name <code>stalwart</code>, permission Sending access, domain <code>22112002.xyz</code>. The key is shown once and is the SMTP password; the username is literally <code>resend</code>.</p>
+<div class="checkpoint"><div class="label">Checkpoint · DNS over HTTPS from the laptop</div>
+<ul><li><code>resend._domainkey.22112002.xyz TXT</code> → the <code>p=MIGf…</code> key</li><li><code>rsend.22112002.xyz CNAME</code> → <code>rsend-euw1.forge.rmta.net.</code></li></ul></div>
 </section>
 
-<section id="first-week">
-<h2><span class="num">12.</span> The first week: DMARC, MTA-STS, and what to watch</h2>
-<p><strong>DMARC rollout.</strong> Stalwart publishes the DMARC record; what matters is its policy. Start at <code>p=none</code> with a reporting address so that I receive aggregate reports for a week or two and can see every source sending as my domain. Only once those reports show nothing but the VPS do I move to <code>p=quarantine</code> and then <code>p=reject</code>. Jumping straight to reject on day one is how people lose mail from a forwarding path they forgot about.</p>
-<p><strong>MTA-STS.</strong> The DNS record Stalwart publishes tells other servers that a policy exists; the policy itself is a small text file that must be served over HTTPS at <code>https://mta-sts.22112002.xyz/.well-known/mta-sts.txt</code>, from a certificate valid for that name. This <em>can</em> go through the Cloudflare Tunnel, because it is plain HTTPS: add <code>mta-sts.22112002.xyz</code> to the tunnel ingress and the Caddyfile the same way as any other site, and either serve a static file or <code>reverse_proxy</code> to Stalwart's HTTP listener.</p>
-<div class="callout verify"><div class="label">Verify</div>
-<p>Stalwart's HTTP listener is documented as serving the MTA-STS policy for managed domains, which would make the Caddy block a two-line reverse proxy. I have not confirmed the exact path it serves it on. If it does not, the static-file version is a four-line policy I can write by hand, with <code>mx: mail.22112002.xyz</code> and <code>mode: testing</code> until the DMARC reports are clean.</p></div>
-<p><strong>What to watch for the first week:</strong></p>
+<section id="handover">
+<h2><span class="num">4.</span> Handing the MX and SPF to Cloudflare (15:10 to 15:35)</h2>
+<p>Stalwart had been managing MX, SPF and MTA-STS all morning. Cloudflare Email Routing wants to own the MX and the apex SPF. So: in the Stalwart admin, <strong>Management › Domains › Domains › 22112002.xyz › DNS › Record Types</strong>, untick <strong>MX records</strong>, <strong>SPF records</strong> and <strong>MTA-STS policy record</strong>, Save.</p>
+<p>Unticking does not delete anything. The records Stalwart had published stayed in the zone and had to be removed by hand on the Cloudflare DNS page. That took two passes: the first "done" had removed only the <code>_mta-sts</code> TXT, and the MX and the <code>v=spf1 mx -all</code> TXT were still answering five minutes later, which I confirmed by polling the resolver rather than assuming a cache.</p>
+<p>A side effect I had been seeing since the morning finally made sense here. Once <code>mail.22112002.xyz</code> became a proxied tunnel record, Cloudflare rewrote the MX target to <code>_dc-mx.0278da436451.22112002.xyz</code>, a DNS-only alias that resolves to the tunnel's <code>cfargotunnel.com</code> name. A test message sent from Gmail during that window went to that name, found nothing speaking SMTP, and sat in Gmail's retry queue; Stalwart's log showed no inbound connection at all.</p>
+<div class="checkpoint"><div class="label">Checkpoint · after the second pass</div>
+<ul><li><code>22112002.xyz MX</code> → none (before Email Routing added its own)</li><li><code>22112002.xyz TXT</code> → no <code>v=spf1 mx -all</code></li><li><code>_mta-sts.22112002.xyz TXT</code> → none</li></ul></div>
+</section>
+
+<section id="routing">
+<h2><span class="num">5.</span> Enabling Email Routing (15:40)</h2>
+<p>Cloudflare dashboard, the domain, <strong>Email › Email Routing › Get started</strong>. The "Verify DNS records" screen listed exactly what it was about to add:</p>
+<table>
+<thead><tr><th>Type</th><th>Name</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>MX</td><td><code>22112002.xyz</code></td><td>78 <code>route1.mx.cloudflare.net</code></td></tr>
+<tr><td>MX</td><td><code>22112002.xyz</code></td><td>52 <code>route2.mx.cloudflare.net</code></td></tr>
+<tr><td>MX</td><td><code>22112002.xyz</code></td><td>60 <code>route3.mx.cloudflare.net</code></td></tr>
+<tr><td>TXT</td><td><code>cf2024-1._domainkey</code></td><td><code>v=DKIM1; h=sha256; k=rsa; p=MIIBIjAN…</code></td></tr>
+<tr><td>TXT</td><td><code>22112002.xyz</code></td><td><code>v=spf1 include:_spf.mx.cloudflare.net ~all</code></td></tr>
+</tbody>
+</table>
+<p><strong>Add records and enable</strong>. The overview then showed "Syncing" and "Locked" for about a minute, then <strong>Routing status: Enabled</strong>. All five records were live at once.</p>
+
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Two columns showing the DNS zone before and after the handover. Left, Stalwart-managed: MX to mail.22112002.xyz, SPF v=spf1 mx -all, two Stalwart DKIM keys, DMARC, MTA-STS, SRV records. Right, after: three Cloudflare MX records, Cloudflare's SPF and DKIM, Resend's DKIM and rsend CNAME, the same DMARC and SRV records, and mail.22112002.xyz as a proxied tunnel hostname.">
+  <rect x="20" y="20" width="450" height="290" class="box2"/>
+  <text x="35" y="45" class="title">Before: Stalwart publishes everything (morning)</text>
+  <text x="35" y="75" class="mono">MX     22112002.xyz        10 mail.22112002.xyz</text>
+  <text x="35" y="95" class="mono">A      mail                (none: no public IP)</text>
+  <text x="35" y="115" class="mono">TXT    22112002.xyz        v=spf1 mx -all</text>
+  <text x="35" y="135" class="mono">TXT    v1-rsa-20261008._domainkey      DKIM</text>
+  <text x="35" y="155" class="mono">TXT    v1-ed25519-20261008._domainkey  DKIM</text>
+  <text x="35" y="175" class="mono">TXT    _dmarc              p=reject</text>
+  <text x="35" y="195" class="mono">TXT    _mta-sts            v=STSv1</text>
+  <text x="35" y="215" class="mono">SRV    _imaps/_submissions/_jmap… → mail:993/465/443</text>
+  <text x="35" y="235" class="mono">CNAME  autoconfig/autodiscover/mta-sts → mail</text>
+  <text x="35" y="270" class="muted bad">Nothing accepts port 25 for the MX target.</text>
+  <text x="35" y="290" class="muted bad">Gmail's test message had nowhere to go.</text>
+
+  <rect x="490" y="20" width="450" height="290" class="box2"/>
+  <text x="505" y="45" class="title">After: Cloudflare and Resend own the edges (evening)</text>
+  <text x="505" y="75" class="mono good">MX     22112002.xyz  52 route2 / 60 route3 / 78 route1.mx.cloudflare.net</text>
+  <text x="505" y="95" class="mono good">TXT    22112002.xyz  v=spf1 include:_spf.mx.cloudflare.net ~all</text>
+  <text x="505" y="115" class="mono good">TXT    cf2024-1._domainkey      Cloudflare DKIM</text>
+  <text x="505" y="135" class="mono good">TXT    resend._domainkey        Resend DKIM</text>
+  <text x="505" y="155" class="mono good">CNAME  rsend → rsend-euw1.forge.rmta.net   (Resend SPF)</text>
+  <text x="505" y="175" class="mono">TXT    v1-rsa / v1-ed25519 ._domainkey   still Stalwart's</text>
+  <text x="505" y="195" class="mono">TXT    _dmarc              p=reject (to lower)</text>
+  <text x="505" y="215" class="mono">SRV    unchanged</text>
+  <text x="505" y="235" class="mono accent">mail / mta-sts / autoconfig / autodiscover → tunnel (proxied)</text>
+  <text x="505" y="270" class="muted good">Port 25 is Cloudflare's problem. 465 is Resend's.</text>
+  <text x="505" y="290" class="muted good">HTTPS is the tunnel's, as it always was.</text>
+</svg>
+<figcaption>The zone before and after the afternoon. Stalwart still manages its own DKIM keys, DMARC and the SRV records; the two edges moved to the two services that can actually stand on them.</figcaption>
+</figure>
+</section>
+
+<section id="deploy">
+<h2><span class="num">6.</span> Deploying the Worker and proving the pipeline before any mail arrives (15:45)</h2>
+<pre><code>cd worker &amp;&amp; npx wrangler deploy</code></pre>
+<pre><code>Your Worker has access to the following bindings:
+Binding                                            Resource
+env.VPC (0cf125dc-378c-4af2-83e3-d58df0fbed3f)     VPC Network
+env.SMTP_ADDRESS ("127.0.0.1:25")                  Environment Variable
+Uploaded mail-inbound-bridge (5.84 sec)
+No targets deployed for mail-inbound-bridge (2.45 sec)</code></pre>
+<p>"No targets deployed" looked like a failure and is not: an Email Worker has no HTTP route. The Email Routing rule is what triggers it. The VPC binding resolved against my tunnel first time, with no extra setup on the tunnel side.</p>
+<p>While that uploaded, I did on <code>srv1</code> exactly what the Worker is about to do, so that if the real message failed I would know which half to blame:</p>
+<pre><code>python3 - &lt;&lt;'EOF'
+import smtplib, email.utils, time
+msg = f"""From: Loopback Test &lt;someone@example.org&gt;
+To: olwethu@22112002.xyz
+Subject: loopback SMTP test {time.strftime("%H:%M:%S")}
+Date: {email.utils.formatdate()}
+Message-ID: {email.utils.make_msgid(domain="example.org")}
+
+This simulates the Email Worker handing a message to Stalwart on 127.0.0.1:25.
+"""
+s = smtplib.SMTP("127.0.0.1", 25, timeout=20)
+s.ehlo("gmail.com")
+print(s.sendmail("someone@example.org", ["olwethu@22112002.xyz"], msg))
+s.quit()
+EOF</code></pre>
+<div class="checkpoint"><div class="label">Checkpoint · Stalwart log, 13:46 UTC</div>
 <ul>
-  <li><code>/var/log/postfix.log</code> on the VPS for <code>status=deferred</code> or <code>status=bounced</code>, especially from Outlook/Hotmail, which is slower than Gmail to trust a new IP.</li>
-  <li>Stalwart's queue page for anything stuck. A message that sits there for hours means the relay route or Postfix is unhappy.</li>
-  <li>The DMARC aggregate reports (Stalwart's Reports section) for any sender that is not <code>&lt;vps-public-ip&gt;</code>.</li>
-  <li><code>tailscale status</code> on the VPS after any reboot. The Homelab series already has a story about a host sitting in "needs login" for thirteen days; a VPS that reboots for a kernel update and loses Tailscale takes the mail server with it.</li>
-</ul>
-<div class="checkpoint"><div class="label">Final checkpoint</div>
-<ul>
-  <li>DMARC at <code>p=none</code> with reports arriving.</li>
-  <li>MTA-STS policy reachable at its URL from mobile data.</li>
-  <li>A reminder set for two weeks from now to review reports and tighten DMARC.</li>
+  <li><code>smtp.dmarc-fail</code> for <code>example.org</code>, policy reject, <code>strict = false</code>: accepted anyway</li>
+  <li><code>message-ingest.spam</code>: filed as possible spam, which is the right verdict for an unsigned sender claiming someone else's domain</li>
+  <li><code>delivery.completed</code> in 0 ms</li>
 </ul></div>
+<p>So Stalwart accepts port-25 submissions from loopback for its own domain without authentication, runs the checks, and files the result. The only question left was whether the Worker could reach that port.</p>
+</section>
+
+<section id="catchall">
+<h2><span class="num">7.</span> The catch-all rule, and the first message from Gmail (16:09)</h2>
+<p>Email Routing, <strong>Routing rules</strong>, <strong>Catch-all address</strong>, Edit: action <strong>Send to a Worker</strong>, destination <strong>mail-inbound-bridge</strong>, Save, Active. No per-address rules; the catch-all sends every address at the domain to the Worker and Stalwart decides which ones exist. Then a fresh message from Gmail, with <code>npx wrangler tail mail-inbound-bridge --format pretty</code> running on the laptop.</p>
+<pre><code>Email from:…@gmail.com to:olwethu@22112002.xyz size:6962 @ 10/8/2026, 4:09:41 PM - Ok</code></pre>
+<p>And on <code>srv1</code>, the sequence for the same message:</p>
+<pre><code>14:11:36Z  SPF EHLO check failed   remoteIp = 127.0.0.1  result = SPF soft fail
+14:11:37Z  IPREV check passed      details = ["localhost."]
+14:11:37Z  SPF From check failed   from = …@gmail.com  result = SPF soft fail
+14:11:37Z  SMTP MAIL FROM          from = …@gmail.com
+14:11:37Z  SMTP RCPT TO            to = olwethu@22112002.xyz
+14:11:38Z  DKIM verification passed   domain = "gmail.com"
+14:11:38Z  DMARC check passed         domain = "gmail.com"  policy = "none"
+14:11:44Z  Queued message for delivery
+14:11:44Z  Message ingested (message-ingest.ham)   mailboxId = [0]
+14:11:44Z  Delivery completed   elapsed = 0ms</code></pre>
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Hop by hop for the first Gmail message: Gmail to Cloudflare MX (Email Routing activity log: delivered), Worker (wrangler tail: Ok at 16:09:41), VPC through the homelab tunnel to cloudflared on srv1, Stalwart on loopback port 25 (log: spf soft fail, dkim-pass gmail.com, dmarc-pass, message-ingest.ham, delivery.completed 0 ms), Roundcube inbox at 16:11.">
+  <rect x="20" y="60" width="150" height="64" class="box"/>
+  <text x="35" y="85">Gmail's MTA</text>
+  <text x="35" y="105" class="muted">to the MX, port 25</text>
+  <rect x="200" y="60" width="160" height="64" class="box"/>
+  <text x="215" y="85">Cloudflare MX</text>
+  <text x="215" y="105" class="muted">Email Routing</text>
+  <rect x="390" y="60" width="160" height="64" class="box"/>
+  <text x="405" y="85">Worker</text>
+  <text x="405" y="105" class="muted">mail-inbound-bridge</text>
+  <rect x="580" y="60" width="160" height="64" class="box"/>
+  <text x="595" y="85">cloudflared on srv1</text>
+  <text x="595" y="105" class="muted">VPC through the tunnel</text>
+  <rect x="770" y="60" width="170" height="64" class="box"/>
+  <text x="785" y="85">Stalwart :25</text>
+  <text x="785" y="105" class="muted">then Roundcube inbox</text>
+  <path d="M170 92 H200" class="edge ok" marker-end="url(#a)"/>
+  <path d="M360 92 H390" class="edge http" marker-end="url(#a)"/>
+  <path d="M550 92 H580" class="edge http" marker-end="url(#a)"/>
+  <path d="M740 92 H770" class="edge ok" marker-end="url(#a)"/>
+
+  <rect x="20" y="150" width="920" height="150" class="box2"/>
+  <text x="35" y="175" class="title">The matching evidence, one line per hop</text>
+  <text x="35" y="200" class="mono accent">Routing activity log · delivered to mail-inbound-bridge</text>
+  <text x="35" y="220" class="mono accent">wrangler tail · Email from:…@gmail.com to:olwethu@22112002.xyz size:6962 @ 16:09:41 - Ok</text>
+  <text x="35" y="240" class="mono">cloudflared journal · (nothing: it only logs errors)</text>
+  <text x="35" y="260" class="mono good">stalwart · 14:11:36Z spf soft fail (127.0.0.1) → dkim-pass gmail.com → dmarc-pass → message-ingest.ham → delivery.completed 0ms</text>
+  <text x="35" y="280" class="mono good">Roundcube · message in Inbox, 16:11</text>
+  <text x="20" y="322" class="muted">Green hops are SMTP. Blue hops are Cloudflare's. The two-minute gap between the Worker's timestamp and Stalwart's is the open question in the box below.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The first Gmail message, hop by hop, with the line each hop wrote. Five hops, three logs, one inbox.</figcaption>
+</figure>
+<div class="checkpoint"><div class="label">Checkpoint</div>
+<ul><li>Roundcube inbox showed the message from Gmail, timestamped 16:11</li><li>The two SPF lines are the loopback trade-off from part 05, and they did not change the verdict</li></ul></div>
+<div class="callout verify"><div class="label">Unexplained</div>
+<p>The Worker logged the message at 16:09:41 and Stalwart saw the EHLO at 16:11:36, two minutes later. Either the first VPC connection through the tunnel was slow to establish or Stalwart's pre-DATA checks took that long. I did not chase it on the day; subsequent messages are worth timing.</p></div>
+</section>
+
+<section id="relay">
+<h2><span class="num">8.</span> The relay route and the strategy (16:46)</h2>
+<p><strong>Settings › MTA › Outbound › Routes › Add</strong>, route type <strong>Relay Host</strong>: Address <code>smtp.resend.com</code>, Port <code>465</code>, Protocol SMTP, <strong>Implicit TLS</strong> on, Allow Invalid Certs off, Username <code>resend</code>, Secret → "Secret value" → the API key, Name <code>resend</code>. Save.</p>
+<p><strong>Settings › MTA › Outbound › Strategy</strong>. The Routing expression is an IF/THEN/ELSE editor. It read <code>IF is_local_domain(rcpt_domain) THEN 'local' ELSE 'mx'</code>; the ELSE became <code>'resend'</code>, quotes included. Scheduling, Connection and TLS were left alone. Save.</p>
+<p>Then the step the admin pages do not mention: nothing applies until <strong>Management › Actions › Reload › Server settings</strong>. Actions lives at the bottom of the Management sidebar, the one that starts with Dashboard and Directory, not the Settings sidebar. The reload leaves no line in the log, which is how I nearly missed that it had not happened.</p>
+</section>
+
+<section id="first-outbound">
+<h2><span class="num">9.</span> The message that went the wrong way, and the two that went right (16:46 to 17:03)</h2>
+<p>The first test message from Roundcube to Gmail was sent before the reload. Stalwart, still on the old strategy, resolved Gmail's MX and tried <code>gmail-smtp-in.l.google.com</code> on port 25 from my house. Each attempt took about 270 seconds to time out across the IPv4 and IPv6 addresses, logged <code>delivery.connect-error</code>, and was rescheduled. Exactly the failure part 01 predicted, reproduced on demand.</p>
+<p>After the reload, every delivery used the route:</p>
+<pre><code>15:01:06Z  Connecting to remote server   hostname = "smtp.resend.com"  remoteIp = 54.157.71.137  remotePort = 465
+15:01:09Z  Message delivered   to = "olwethu@realnet.co.sz"  code = 250  details = "01a11c08-4e71-…"
+15:01:09Z  Delivery completed  elapsed = 3000ms
+
+15:02:29Z  Connecting to remote server   hostname = "smtp.resend.com"  (the Gmail message's retry)
+15:02:33Z  Message delivered   to = "…@gmail.com"  code = 250  details = "01a11c09-980b-…"
+15:02:33Z  Delivery completed  elapsed = 964000ms   (16 minutes queued, 4 seconds to deliver)</code></pre>
+<div class="checkpoint"><div class="label">Checkpoint</div>
+<ul><li>Two <code>250</code> replies from Resend with Resend message IDs</li><li>The Gmail message arrived in the Gmail inbox on its own retry, nothing resent</li></ul></div>
+<div class="callout verify"><div class="label">Not yet read</div>
+<p>I had not yet opened Gmail's "Show original" on the received message when this was written. The expected lines are SPF pass for Resend's host, DKIM pass with <code>d=22112002.xyz</code>, DMARC pass. That reading goes in the build log.</p></div>
+</section>
+
+<section id="left">
+<h2><span class="num">10.</span> What is left</h2>
+<ul>
+  <li><strong>Lower DMARC to <code>p=none</code>.</strong> Stalwart published <code>p=reject</code> by default in the morning. With Resend's aligned DKIM it should pass, but the rollout order in part 03 exists for a reason. The field's location in the admin was not found on the day.</li>
+  <li><strong>Log in from a phone with Twake Mail</strong> against <code>https://mail.22112002.xyz</code>, and record it.</li>
+  <li><strong>Read Gmail's "Show original"</strong> for the first relayed message.</li>
+  <li><strong>Time a second inbound message</strong> to see whether the two-minute gap repeats.</li>
+  <li><strong>Watch Workers VPC's beta terms</strong>, and keep the HTTPS-gateway fallback from part 05 in mind.</li>
+  <li>Binding Stalwart's listeners to the Tailscale IP, planned for the VPS design, is now moot: nothing outside the VM can reach them anyway.</li>
+</ul>
 </section>
 
 <section id="glossary">
 <h2>Glossary for this part</h2>
 <dl class="gloss">
-<dt>Front door</dt><dd>My name for the rented VPS: the only machine in the design with a public IP, running only HAProxy and Postfix.</dd>
-<dt>PROXY protocol v2</dt><dd>A small binary header HAProxy prepends to a forwarded TCP connection, carrying the original client IP and port. The receiving server must be told which addresses it may trust to send one.</dd>
-<dt>TCP mode</dt><dd>HAProxy forwarding raw bytes without interpreting the protocol. The opposite is HTTP mode, where it reads and rewrites requests.</dd>
-<dt>FCrDNS</dt><dd>Forward-confirmed reverse DNS: the PTR of an IP names a host whose A record is that same IP. Receiving servers check it on every connection.</dd>
-<dt>Open relay</dt><dd>An SMTP server that forwards mail from anyone to anyone. The thing <code>mynetworks</code> and <code>reject_unauth_destination</code> exist to prevent.</dd>
-<dt>Relay route</dt><dd>Stalwart's object for "send this to a specific host instead of looking up the recipient's MX". Here it points at Postfix over Tailscale.</dd>
-<dt>Aggregate report</dt><dd>The daily XML summary a receiver sends to the address in your DMARC record, listing every IP that sent mail as your domain and how it was judged.</dd>
+<dt>Catch-all rule</dt><dd>Email Routing's rule for any address that no other rule matches. Pointing it at the Worker sends the whole domain's mail home.</dd>
+<dt><code>wrangler</code></dt><dd>Cloudflare's command-line tool for Workers: login, deploy, tail logs.</dd>
+<dt>VPC Network binding</dt><dd>The <code>vpc_networks</code> entry in <code>wrangler.jsonc</code> that attaches a tunnel to the Worker as <code>env.VPC</code>.</dd>
+<dt>Reload server settings</dt><dd>The Stalwart action that compiles saved configuration into the running server. Routes and strategies do nothing until it runs.</dd>
+<dt><code>_dc-mx</code></dt><dd>Cloudflare's automatic alias for an MX record whose target is a proxied name. It exists so the MX still resolves to something, even if that something cannot speak SMTP.</dd>
+<dt>Soft fail</dt><dd>SPF's <code>~all</code> result: the sending IP is not listed, treat with suspicion but do not reject. What loopback produces here on every inbound message.</dd>
 </dl>
 </section>
 
