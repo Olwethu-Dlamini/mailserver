@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06 · Roundcube Behind the Tunnel</title>
+<meta name="description" content="Webmail for the mail server, running on the PHP, MariaDB and Caddy already on srv1, published through the Cloudflare Tunnel like every other site.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a class="active" href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 06 · The tools</div>
+  <h1>Roundcube Behind the Tunnel</h1>
+  <p class="lead">Webmail is the one piece of this project that <em>is</em> an ordinary website. It runs on the PHP, MariaDB and Caddy I already have on <code>srv1</code>, and it goes out through the Cloudflare Tunnel the same way the portfolio and the LMS do.</p>
+  <div class="meta">Reading time about 12 minutes. The commands here are the plan; part 07 is where they get run in order.</div>
+</header>
+
+<section id="what-webmail-is">
+<h2><span class="num">1.</span> What webmail actually is</h2>
+<p>I had a vague idea that "webmail" was part of the mail server. It is not. Webmail is a <strong>mail client</strong>, the same category as Thunderbird or the Mail app on a phone. The only difference is where it runs: instead of running on my laptop, it runs on the server and draws its screen in a browser tab.</p>
+<p>That means Roundcube talks to Stalwart exactly the way Thunderbird would: it logs in over <strong>IMAP</strong> to read mail, and over <strong>SMTP submission</strong> to send it. It stores none of my messages itself. Its own database holds only its own furniture: address book, preferences, session state. If I deleted Roundcube tomorrow, every message would still be in Stalwart, untouched.</p>
+<p>Once I understood that, the architecture became obvious. Roundcube is a website that happens to be a mail client. Websites on <code>srv1</code> have a known pattern. Follow the pattern.</p>
+<div class="callout tip"><div class="label">Why this matters for the CGNAT story</div>
+<p>Because Roundcube is a browser-facing HTTP app, the Cloudflare Tunnel is exactly the right tool for it, for all the reasons part 01 said the tunnel is the <em>wrong</em> tool for SMTP. Visitors pull a web page; the tunnel carries HTTP; done. The actual mail protocols never leave the VM, because Roundcube and Stalwart are on the same machine and talk over loopback.</p></div>
+</section>
+
+<section id="why-roundcube">
+<h2><span class="num">2.</span> Why Roundcube, and the clients I didn't pick</h2>
+<p>Roundcube is a PHP application. It needs a PHP runtime, a database, and a web server to front it. <code>srv1</code> already has all three, because the LMS needed them: PHP-FPM 8.4 listening on <code>/run/php/php8.4-fpm.sock</code>, MariaDB, and Caddy on port 80 with <code>auto_https off</code>. Nothing new to install at the platform level, which fits the rule I keep coming back to: add the smallest number of new moving parts per feature.</p>
+<h3>SOGo</h3>
+<p>SOGo is the webmail Mailcow ships with, and it is a groupware suite: mail, shared calendars, contacts, ActiveSync for phones. It is also heavy, with its own daemon, memcached, and a preference for PostgreSQL or a dedicated MySQL schema. I am one person with one domain. Stalwart already speaks CalDAV and CardDAV natively if I ever want calendars, so SOGo would be solving a problem I don't have, at a RAM cost I'd notice on a 4 GB VM.</p>
+<h3>SnappyMail (formerly RainLoop)</h3>
+<p>Perfectly good, lighter than Roundcube, and it doesn't even need a database for basic use. The honest reason I didn't pick it is documentation and reach: Roundcube has been the default self-hosted webmail for nearly twenty years, every hosting guide assumes it, and when something breaks the error message has already been seen by someone else. For a first build that matters more than a smaller footprint.</p>
+<h3>Stalwart's own <code>/account</code> page</h3>
+<p>Stalwart's web UI has an end-user area at <code>/account</code>. I want to be accurate about what it is: an <strong>account manager</strong>, where a user changes their password, manages app passwords, encryption keys and Sieve filters. It is not a full mail client with a reading pane and a compose window. It is useful and I will keep it reachable, but it does not replace webmail.</p>
+<div class="callout road"><div class="label">Road not taken · no webmail at all</div>
+<p>Thunderbird on the laptop and the stock mail app on the phone, both pointed at the front door's 993 and 465, would be enough for daily use and remove an entire PHP app from the attack surface. I nearly went this way. The deciding factor was being able to check mail from any browser, including a machine I don't own, without configuring a client. If Roundcube ever becomes a maintenance burden, this is the fallback.</p></div>
+</section>
+
+<section id="path">
+<h2><span class="num">3.</span> The request path, end to end</h2>
+<figure>
+<svg viewBox="0 0 960 420" role="img" aria-label="A browser reaches webmail.22112002.xyz through Cloudflare and the tunnel to Caddy on srv1, which hands the request to PHP-FPM running Roundcube. Roundcube talks to Stalwart over loopback on ports 143 and 587. A dotted line shows that resolving mail.22112002.xyz publicly would route out to the VPS and back, which is not the path we want.">
+  <rect x="20" y="20" width="300" height="380" class="box2"/>
+  <text x="35" y="45" class="title">Internet</text>
+  <rect x="360" y="20" width="580" height="380" class="box2"/>
+  <text x="375" y="45" class="title">srv1 at home</text>
+
+  <rect x="40" y="80" width="260" height="56" class="box"/>
+  <text x="55" y="103">Browser</text>
+  <text x="55" y="121" class="mono">https://webmail.22112002.xyz</text>
+  <rect x="40" y="170" width="260" height="56" class="box"/>
+  <text x="55" y="193">Cloudflare edge</text>
+  <text x="55" y="211" class="muted">terminates HTTPS, picks the tunnel</text>
+  <rect x="40" y="300" width="260" height="56" class="box"/>
+  <text x="55" y="323">Rented VPS front door</text>
+  <text x="55" y="341" class="mono">mail.22112002.xyz → HAProxy</text>
+
+  <rect x="380" y="80" width="150" height="56" class="box"/>
+  <text x="395" y="103">cloudflared</text>
+  <text x="395" y="121" class="muted">ingress → :80</text>
+  <rect x="560" y="80" width="150" height="56" class="box"/>
+  <text x="575" y="103">Caddy :80</text>
+  <text x="575" y="121" class="mono">php_fastcgi</text>
+  <rect x="740" y="80" width="180" height="56" class="box"/>
+  <text x="755" y="103">PHP-FPM 8.4</text>
+  <text x="755" y="121" class="muted">running Roundcube</text>
+
+  <rect x="740" y="190" width="180" height="56" class="box"/>
+  <text x="755" y="213">MariaDB</text>
+  <text x="755" y="231" class="muted">roundcubemail (its own data)</text>
+
+  <rect x="380" y="290" width="540" height="90" class="box"/>
+  <text x="395" y="313">Stalwart</text>
+  <text x="395" y="331" class="muted">mailboxes, authentication, DKIM, spam filter</text>
+  <text x="395" y="355" class="mono">127.0.0.1:143 imap STARTTLS      127.0.0.1:587 submission STARTTLS</text>
+  <text x="395" y="372" class="mono">100.72.72.58:25 / :465 / :993 (for the front door only, part 05)</text>
+
+  <path d="M170 136 V170" class="edge http" marker-end="url(#a)"/>
+  <path d="M300 198 H340 V108 H380" class="edge http" marker-end="url(#a)"/>
+  <text x="305" y="160" class="muted accent">tunnel</text>
+  <path d="M530 108 H560" class="edge http" marker-end="url(#a)"/>
+  <path d="M710 108 H740" class="edge http" marker-end="url(#a)"/>
+  <path d="M830 136 V190" class="edge" marker-end="url(#a)"/>
+  <path d="M800 136 V290" class="edge ok" marker-end="url(#a)"/>
+  <text x="640" y="200" class="muted good">IMAP + submission</text>
+  <text x="640" y="216" class="muted good">over loopback only</text>
+
+  <path d="M300 328 H380" class="edge bad"/>
+  <path d="M170 300 V250 C 170 240, 740 240, 740 160" class="edge bad"/>
+  <text x="400" y="265" class="muted bad">not this way: if Roundcube resolved mail.22112002.xyz publicly it</text>
+  <text x="400" y="281" class="muted bad">would leave the house, hit the VPS, and come straight back in</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Blue is the ordinary website path, identical to the portfolio and the LMS. Green is mail protocol traffic, and it never leaves the VM. The red dotted line is the mistake to avoid when telling Roundcube where the mail server is.</figcaption>
+</figure>
+<p>Two hostnames, two completely different jobs:</p>
+<table>
+<thead><tr><th>Hostname</th><th>Points at</th><th>Cloudflare cloud</th><th>Carries</th></tr></thead>
+<tbody>
+<tr><td><code>webmail.22112002.xyz</code></td><td>The tunnel (CNAME, created by <code>cloudflared tunnel route dns</code>)</td><td>Orange, proxied</td><td>HTTPS to Roundcube</td></tr>
+<tr><td><code>mail.22112002.xyz</code></td><td>The VPS public IP (A record)</td><td><strong>Grey, DNS only</strong></td><td>SMTP 25, submission 465, IMAP 993</td></tr>
+</tbody>
+</table>
+<div class="callout danger"><div class="label">Never put mail.22112002.xyz in the tunnel</div>
+<p>It is tempting because every other hostname went there. If <code>mail.22112002.xyz</code> becomes a proxied Cloudflare record, the MX target resolves to Cloudflare's IPs, which do not answer on port 25, and every inbound message bounces. Part 05 covers why that name has to be a plain, unproxied A record to the front door.</p></div>
+</section>
+
+<section id="install">
+<h2><span class="num">4.</span> Getting Roundcube onto srv1</h2>
+<p>Debian 13 offers two routes and I want to be honest about the trade.</p>
+<table>
+<thead><tr><th></th><th><code>apt install roundcube</code></th><th>Upstream "complete" tarball</th></tr></thead>
+<tbody>
+<tr><td>Version</td><td>Whatever Debian froze at release</td><td>Current stable from roundcube.net</td></tr>
+<tr><td>Security updates</td><td>Automatic, via <code>apt upgrade</code></td><td>Manual: download, unpack, run the update script</td></tr>
+<tr><td>Database setup</td><td>dbconfig asks questions and does it</td><td>You create the DB and import the schema yourself</td></tr>
+<tr><td>Paths</td><td><code>/usr/share/roundcube</code>, <code>/etc/roundcube</code>, <code>/var/lib/roundcube</code></td><td>Wherever you unpack it, one folder, obvious</td></tr>
+<tr><td>Fits the <code>/var/www/&lt;hostname&gt;</code> pattern</td><td>Needs a symlink or a Caddy root pointing elsewhere</td><td>Yes, directly</td></tr>
+</tbody>
+</table>
+<p>I'm going with the <strong>tarball</strong>. The apt package is the "forget about it" option and I respect that, but it lags, and the whole point of this project is to understand each piece. Unpacking a tarball into <code>/var/www/webmail.22112002.xyz</code> keeps every site on the box laid out the same way, and the manual database step is the same four SQL lines I already did for the LMS. The price is remembering to update it, which I'm putting on the same checklist as Stalwart upgrades.</p>
+<pre><code># Dependencies Roundcube wants on top of what the LMS already pulled in
+sudo apt install -y php8.4-intl php8.4-mbstring php8.4-xml php8.4-zip php8.4-gd php8.4-curl php8.4-mysql
+
+# Fetch and unpack (check roundcube.net/download for the current version number)
+cd /tmp
+curl -LO https://github.com/roundcube/roundcubemail/releases/download/&lt;version&gt;/roundcubemail-&lt;version&gt;-complete.tar.gz
+tar xzf roundcubemail-&lt;version&gt;-complete.tar.gz
+sudo mv roundcubemail-&lt;version&gt; /var/www/webmail.22112002.xyz
+sudo chown -R www-data:www-data /var/www/webmail.22112002.xyz/temp /var/www/webmail.22112002.xyz/logs</code></pre>
+<div class="callout verify"><div class="label">Verify at build time</div>
+<p>Recent Roundcube releases ship a <code>public_html/</code> directory meant to be the web root, so that <code>config/</code>, <code>temp/</code> and <code>logs/</code> sit outside anything the web server can serve. Older releases put <code>index.php</code> at the top level. After unpacking, run <code>ls /var/www/webmail.22112002.xyz</code> and set the Caddy <code>root</code> to whichever directory actually holds <code>index.php</code>. The exact PHP extension list is also version dependent; the installer page lists what is missing.</p></div>
+</section>
+
+<section id="database">
+<h2><span class="num">5.</span> The database</h2>
+<p>Same recipe as the LMS, and the same two lessons apply: a database user is credentials plus a grant, and <code>'localhost'</code> means the Unix socket, not <code>127.0.0.1</code>.</p>
+<pre><code>sudo mariadb</code></pre>
+<pre><code>CREATE DATABASE roundcubemail CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'roundcube'@'localhost' IDENTIFIED BY 'a_real_password';
+GRANT ALL PRIVILEGES ON roundcubemail.* TO 'roundcube'@'localhost';
+FLUSH PRIVILEGES;</code></pre>
+<pre><code># Import the schema that ships in the tarball
+sudo mariadb roundcubemail &lt; /var/www/webmail.22112002.xyz/SQL/mysql.initial.sql</code></pre>
+<p>Roundcube's connection string then uses the socket form so it lines up with the <code>@'localhost'</code> user:</p>
+<pre><code>$config['db_dsnw'] = 'mysql://roundcube:a_real_password@localhost/roundcubemail';</code></pre>
+</section>
+
+<section id="config">
+<h2><span class="num">6.</span> Pointing Roundcube at Stalwart</h2>
+<p>This is the part that is specific to this build, and it has one trap. The file is <code>config/config.inc.php</code>, created by copying <code>config/config.inc.php.sample</code>.</p>
+<pre><code>&lt;?php
+$config['db_dsnw'] = 'mysql://roundcube:a_real_password@localhost/roundcubemail';
+
+// Stalwart, on the same machine, over loopback
+$config['imap_host'] = 'tls://127.0.0.1:143';   // STARTTLS on 143; or 'ssl://127.0.0.1:993'
+$config['smtp_host'] = 'tls://127.0.0.1:587';   // submission with STARTTLS
+$config['smtp_user'] = '%u';                    // reuse the IMAP login for sending
+$config['smtp_pass'] = '%p';
+
+// The certificate Stalwart presents is for mail.22112002.xyz, not 127.0.0.1.
+// Tell PHP which name to check it against, or TLS verification fails.
+$config['imap_conn_options'] = [
+  'ssl' =&gt; ['verify_peer' =&gt; true, 'verify_peer_name' =&gt; true, 'peer_name' =&gt; 'mail.22112002.xyz'],
+];
+$config['smtp_conn_options'] = [
+  'ssl' =&gt; ['verify_peer' =&gt; true, 'verify_peer_name' =&gt; true, 'peer_name' =&gt; 'mail.22112002.xyz'],
+];
+
+$config['des_key'] = 'exactly-24-random-chars!';   // generate: openssl rand -base64 18
+$config['product_name'] = 'Mail · 22112002.xyz';
+$config['plugins'] = ['archive', 'zipdownload', 'managesieve'];
+$config['enable_installer'] = false;</code></pre>
+<h3>The trap: which name is the certificate for?</h3>
+<p>Stalwart's certificate, obtained in part 07 through ACME with a DNS challenge, is for <code>mail.22112002.xyz</code>. Roundcube connects to <code>127.0.0.1</code>. PHP's TLS layer compares the name it connected to against the name in the certificate, sees that <code>127.0.0.1</code> is not <code>mail.22112002.xyz</code>, and refuses. There are two honest fixes and one dishonest one.</p>
+<ul>
+  <li><strong>Set <code>peer_name</code></strong> in the connection options, as above. Connect to the IP, verify against the real name. This is the one I'm using.</li>
+  <li><strong>Connect to the name, but override where it resolves</strong>. Add <code>127.0.0.1 mail.22112002.xyz</code> to <code>/etc/hosts</code> on <code>srv1</code>, then set <code>imap_host</code> to <code>tls://mail.22112002.xyz:143</code>. Equivalent, slightly more magic, but it also makes <code>openssl s_client -connect mail.22112002.xyz:993</code> on the box test the local server, which is handy.</li>
+  <li><strong>Turn verification off</strong> with <code>verify_peer =&gt; false</code>. It would work. It is also the kind of shortcut that quietly stays forever. Not doing it.</li>
+</ul>
+<p>Why not simply let <code>mail.22112002.xyz</code> resolve normally? Because in public DNS that name points at the <strong>VPS</strong>. From <code>srv1</code>, a connection to it would go out of the house, across the internet to the front door, through HAProxy, back down Tailscale, and into the very same Stalwart process sitting on the same VM. It would work. It would also be absurd, and it would break the moment the VPS was down even though both halves of webmail were fine. Loopback is the right wire.</p>
+</section>
+
+<section id="caddy">
+<h2><span class="num">7.</span> Caddy and the tunnel</h2>
+<p>A new block in <code>/etc/caddy/Caddyfile</code>, following the house style with the explicit <code>:80</code>:</p>
+<pre><code>webmail.22112002.xyz:80 {
+	root * /var/www/webmail.22112002.xyz/public_html
+	encode gzip
+
+	# Belt and braces: never serve these even if the root is wrong
+	@private path /config/* /temp/* /logs/* /SQL/* /bin/* /installer/*
+	respond @private 403
+
+	php_fastcgi unix//run/php/php8.4-fpm.sock
+	file_server
+}</code></pre>
+<pre><code>sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy</code></pre>
+<p>Then the DNS record and the ingress rule, the exact two steps every site on this box has needed:</p>
+<pre><code>cloudflared tunnel route dns homelab webmail.22112002.xyz</code></pre>
+<pre><code># /etc/cloudflared/config.yml, above the http_status:404 catch-all
+  - hostname: webmail.22112002.xyz
+    service: http://127.0.0.1:80</code></pre>
+<pre><code>sudo systemctl restart cloudflared</code></pre>
+<p>Notice what is <em>not</em> here: no <code>mail.22112002.xyz</code>, no 25, no 465, no 993. Caddy and the tunnel know nothing about mail. They know about one more PHP website.</p>
+</section>
+
+<section id="hygiene">
+<h2><span class="num">8.</span> Hygiene, learned the hard way on the LMS</h2>
+<ul>
+  <li><strong>Delete <code>installer/</code> after setup.</strong> Roundcube's web installer can read and rewrite its own config. It must not exist on a public hostname once you're done. <code>sudo rm -rf /var/www/webmail.22112002.xyz/installer</code>, and <code>enable_installer = false</code> as a second lock.</li>
+  <li><strong>Turn on <code>catch_workers_output = yes</code></strong> in <code>/etc/php/8.4/fpm/pool.d/www.conf</code>. Without it PHP errors from workers vanish and a blank page is all you get. This was the second real bug in the LMS build and I'm not debugging it twice.</li>
+  <li><strong>Roundcube's own log</strong> is <code>logs/errors.log</code> inside the install (or syslog if configured). For login problems, it is more useful than Caddy's log, because it records what the IMAP server said.</li>
+  <li><strong>Put the DB password in the same place as the LMS's</strong>, in a password manager, not only in <code>config.inc.php</code>.</li>
+</ul>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Webmail</dt><dd>A mail client that runs on a server and renders in a browser. It reads and sends through IMAP and SMTP like any other client, and stores no messages itself.</dd>
+<dt>Roundcube</dt><dd>The long-standing open source PHP webmail. Needs PHP, a database and a web server.</dd>
+<dt>SOGo</dt><dd>A heavier groupware suite with webmail, calendars and contacts; what Mailcow bundles.</dd>
+<dt>SnappyMail</dt><dd>A lighter PHP webmail descended from RainLoop; a fine alternative with less documentation around it.</dd>
+<dt>Submission (port 587 / 465)</dt><dd>The SMTP port a <em>client</em> uses to hand its own outgoing mail to its own server, with a login. Different from port 25, which is server-to-server.</dd>
+<dt>STARTTLS vs implicit TLS</dt><dd>STARTTLS begins in plain text and upgrades to encryption on request (ports 143, 587). Implicit TLS encrypts from the first byte (ports 993, 465). Roundcube's <code>tls://</code> prefix means STARTTLS; <code>ssl://</code> means implicit.</dd>
+<dt><code>peer_name</code></dt><dd>The hostname PHP checks a TLS certificate against. Needed when you connect by IP but the certificate is for a name.</dd>
+<dt>Loopback</dt><dd><code>127.0.0.1</code>: the machine talking to itself. Traffic on it never leaves the VM and is unaffected by CGNAT or anything in Cloudflare.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="05-the-front-door.html">← 05 · The front door</a>
+  <a href="07-build-home.html">07 · Build part 1: everything at home →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
