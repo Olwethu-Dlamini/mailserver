@@ -141,6 +141,8 @@
 <div class="callout tip"><div class="label">Chosen · a thin front door, with the mail server at home</div>
 <p>Rent the smallest VPS that allows port 25 and lets me set PTR. Run nothing on it but a TCP forwarder for inbound and a minimal relay for outbound, both talking to <code>srv1</code> over Tailscale. The mail server, the mailboxes, the spam filter and the webmail all stay on <code>srv1</code>. The VPS owns the public IP and the reputation; my house owns the data.</p></div>
 <p>It is the first part of the homelab that costs money, roughly the price of a coffee a month, and I am treating that the same way I treated Tailscale's coordination server: a public rendezvous point is a thing that structurally cannot be self-hosted from behind CGNAT, so renting exactly that and nothing more is the honest minimum.</p>
+<div class="callout warn"><div class="label">Postscript, evening of 8 October 2026</div>
+<p>The VPS was never rented. The same afternoon it turned out the budget for it was zero, and a second round of investigation found a front door that costs nothing: Cloudflare Email Routing receives for the domain, a small Worker opens a TCP connection back through my own tunnel and hands each message to Stalwart, and a free relay sends outbound from a reputable IP. The constraint in this part still holds, something with a public IP must accept port 25, it just turned out that something could be rented for free in exchange for different trade-offs. The rewritten <a href="05-the-front-door.html">part 05</a> has the design and part 08 the build.</p></div>
 <p>The rest of the series is the theory I needed to do this properly (02 and 03), the tools (04, 05, 06), and then the build (07, 08).</p>
 </section>
 
