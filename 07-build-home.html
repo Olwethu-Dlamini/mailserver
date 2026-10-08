@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07 · Build Part 1: Everything at Home</title>
+<meta name="description" content="Installing Stalwart on srv1, adding the domain, getting certificates with no open ports, creating accounts and Roundcube, all tested over Tailscale before renting anything.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a class="active" href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 07 · The build</div>
+  <h1>Build Part 1: Everything at Home</h1>
+  <p class="lead">Every piece that lives on <code>srv1</code>, installed and proven over Tailscale before a single cent goes to a VPS provider. If this part works, part 08 is only plumbing.</p>
+  <div class="meta">Each step ends with a checkpoint: the command whose output proves the step worked. Don't move on without it. That rule has saved me more time than any other in this homelab.</div>
+</header>
+
+<div class="callout warn"><div class="label">This page is the plan</div>
+<p>I wrote this <em>before</em> doing the build, from Stalwart's documentation for v0.16 and from how the rest of <code>srv1</code> is set up. Once I have actually done it, this page gets corrected with what really happened, including the wrong turns, in the same spirit as the Caddy debugging story in the Homelab series. Anything marked <strong>verify</strong> is a detail I could not confirm from the docs alone.</p></div>
+
+<section id="map">
+<h2><span class="num">0.</span> What this part builds</h2>
+<figure>
+<svg viewBox="0 0 960 400" role="img" aria-label="The home half of the architecture. On srv1: Stalwart with its listeners, Roundcube behind Caddy and cloudflared, Tailscale. The laptop reaches the admin UI and IMAP over Tailscale. The rented VPS is drawn dashed and greyed out, labelled part 08, not yet.">
+  <rect x="20" y="20" width="250" height="360" class="box2"/>
+  <text x="35" y="45" class="title">My laptop (Tailscale)</text>
+  <text x="35" y="63" class="mono muted">100.113.156.34</text>
+
+  <rect x="310" y="20" width="200" height="360" class="box2" stroke-dasharray="6 5" opacity=".55"/>
+  <text x="325" y="45" class="title muted">Rented VPS</text>
+  <text x="325" y="63" class="muted">part 08, not yet</text>
+  <rect x="330" y="150" width="160" height="56" class="box" opacity=".5"/>
+  <text x="345" y="173" class="muted">HAProxy</text>
+  <text x="345" y="191" class="muted">(does not exist yet)</text>
+
+  <rect x="550" y="20" width="390" height="360" class="box2"/>
+  <text x="565" y="45" class="title">srv1 at home</text>
+  <text x="565" y="63" class="mono muted">100.72.72.58 · built in this part</text>
+
+  <rect x="570" y="85" width="350" height="110" class="box"/>
+  <text x="585" y="108" class="good">Stalwart ✓</text>
+  <text x="585" y="128" class="mono">100.72.72.58:25  :465  :993   (waiting for the VPS)</text>
+  <text x="585" y="146" class="mono">127.0.0.1:143  :587           (for Roundcube)</text>
+  <text x="585" y="164" class="mono">127.0.0.1:8080 /admin         (via tailscale serve)</text>
+  <text x="585" y="184" class="muted">domain, DKIM, DMARC, SPF published · certificate via DNS-01</text>
+
+  <rect x="570" y="220" width="165" height="56" class="box"/>
+  <text x="585" y="243" class="good">Roundcube ✓</text>
+  <text x="585" y="261" class="muted">PHP-FPM + MariaDB</text>
+  <rect x="755" y="220" width="165" height="56" class="box"/>
+  <text x="770" y="243" class="good">Caddy :80 ✓</text>
+  <text x="770" y="261" class="mono">webmail.22112002.xyz</text>
+
+  <rect x="570" y="300" width="165" height="56" class="box"/>
+  <text x="585" y="323">cloudflared</text>
+  <text x="585" y="341" class="muted">+1 ingress line</text>
+  <rect x="755" y="300" width="165" height="56" class="box"/>
+  <text x="770" y="323">tailscaled</text>
+  <text x="770" y="341" class="muted">unchanged</text>
+
+  <rect x="40" y="110" width="210" height="56" class="box"/>
+  <text x="55" y="133">Browser</text>
+  <text x="55" y="151" class="mono">https://srv1.&lt;tailnet&gt;.ts.net/admin</text>
+  <rect x="40" y="200" width="210" height="56" class="box"/>
+  <text x="55" y="223">openssl / swaks</text>
+  <text x="55" y="241" class="mono">→ 100.72.72.58:993 / :465</text>
+  <rect x="40" y="290" width="210" height="56" class="box"/>
+  <text x="55" y="313">Browser</text>
+  <text x="55" y="331" class="mono">https://webmail.22112002.xyz</text>
+
+  <path d="M250 138 C 400 138, 400 170, 570 170" class="edge ts" marker-end="url(#a)"/>
+  <path d="M250 228 C 400 228, 400 130, 570 130" class="edge ts" marker-end="url(#a)"/>
+  <text x="300" y="100" class="muted secc">over Tailscale, private, no public internet involved</text>
+  <path d="M250 318 C 400 318, 400 318, 570 318" class="edge http" marker-end="url(#a)"/>
+  <text x="330" y="310" class="muted accent">Cloudflare Tunnel (the only public path in this part)</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Everything with a tick is built and tested in this part. The VPS stays a dashed outline until part 08. The only path that touches the public internet is webmail, and that goes through the tunnel like every other site.</figcaption>
+</figure>
+<p>The order matters. Stalwart has to exist before the domain can be added; the domain has to exist before certificates and DKIM can be issued; accounts need the domain; Roundcube needs accounts to log in with. Each step's checkpoint is the input to the next.</p>
+</section>
+
+<section id="preflight">
+<h2><span class="num">1.</span> Pre-flight on srv1</h2>
+<p>Five facts to collect before installing anything, because every one of them has bitten this homelab before.</p>
+<h3>Resources</h3>
+<pre><code>free -h
+df -h /</code></pre>
+<p>Stalwart idles around 100 MB and the docs say 1 GB is plenty for a handful of users, so on a 4 GB VM already running Caddy, PHP-FPM and MariaDB there is room. Disk is the one to watch: mailboxes grow and everything is still on one spinning HDD. Note the free space now so there's a baseline.</p>
+<h3>Hostname</h3>
+<p>A mail server introduces itself by name in every SMTP conversation (the <code>EHLO</code> line, part 02), and that name should be <code>mail.22112002.xyz</code>. Stalwart asks for it in the wizard, so the OS hostname does not strictly have to match, but having the machine agree with itself removes a whole class of confusion.</p>
+<pre><code>hostnamectl
+sudo hostnamectl set-hostname mail.22112002.xyz
+# and make the machine able to resolve its own name without asking the internet:
+echo "127.0.1.1 mail.22112002.xyz mail" | sudo tee -a /etc/hosts</code></pre>
+<h3>The clock</h3>
+<p>TLS certificates have validity windows and DKIM signatures carry timestamps. A wrong clock produced the "certificate not yet valid" error back when I set up the tunnel, and it will produce stranger errors here.</p>
+<pre><code>timedatectl          # want: System clock synchronized: yes
+sudo timedatectl set-ntp true</code></pre>
+<h3>Tailscale address</h3>
+<pre><code>tailscale ip -4      # expected 100.72.72.58
+tailscale status</code></pre>
+<h3>Ports</h3>
+<p>Stalwart will want 25, 465, 993, 143, 587 and 8080. Nothing should be on them yet. Caddy is on 80, which is fine.</p>
+<pre><code>sudo ss -tlnp | grep -E ':(25|465|993|143|587|8080)\b'</code></pre>
+<div class="checkpoint"><div class="label">Checkpoint 1</div>
+<ul>
+<li><code>timedatectl</code> says synchronized: yes.</li>
+<li><code>hostnamectl</code> shows <code>mail.22112002.xyz</code> and <code>getent hosts mail.22112002.xyz</code> returns <code>127.0.1.1</code>.</li>
+<li><code>tailscale ip -4</code> prints <code>100.72.72.58</code>.</li>
+<li>The <code>ss</code> command prints nothing: all six ports are free.</li>
+</ul></div>
+</section>
+
+<section id="token">
+<h2><span class="num">2.</span> A Cloudflare API token, scoped tightly</h2>
+<p>Two of Stalwart's best features, publishing DNS records for me and getting certificates without any open port, both work by editing the Cloudflare zone through its API. That needs a token. Cloudflare offers a "Global API Key" that can do anything to every zone on the account. Not that one.</p>
+<p>In the Cloudflare dashboard: profile → API Tokens → Create Token → Create Custom Token:</p>
+<ul>
+  <li><strong>Permissions:</strong> Zone › DNS › Edit, and Zone › Zone › Read.</li>
+  <li><strong>Zone Resources:</strong> Include › Specific zone › <code>22112002.xyz</code>.</li>
+  <li>Leave client IP filtering off for now; <code>srv1</code> has no fixed public IP to filter on.</li>
+</ul>
+<p>The token is shown once. It goes into the password manager immediately, under a name that says what it is for, because in six months "cf-token-2" means nothing. It is pasted into Stalwart in step 5 and nowhere else.</p>
+<div class="checkpoint"><div class="label">Checkpoint 2</div>
+<ul>
+<li>Cloudflare's own verify call succeeds from <code>srv1</code>: <code>curl -s -H "Authorization: Bearer $TOKEN" https://api.cloudflare.com/client/v4/user/tokens/verify</code> returns <code>"status":"active"</code>.</li>
+</ul></div>
+</section>
+
+<section id="install">
+<h2><span class="num">3.</span> Install Stalwart</h2>
+<p>Stalwart's installer puts a single binary at <code>/usr/local/bin/stalwart</code>, data under <code>/var/lib/stalwart/</code>, logs under <code>/var/log/stalwart/</code>, and registers a systemd unit. I'm fetching the script to a file before running it, so I can read it first.</p>
+<pre><code>curl --proto '=https' --tlsv1.2 -sSf https://get.stalw.art/install.sh -o install.sh
+less install.sh
+sudo sh install.sh</code></pre>
+<h3>The bootstrap password</h3>
+<p>On first start there is no <code>/etc/stalwart/config.json</code>, so Stalwart comes up in <strong>bootstrap mode</strong>: no mail services, just the web UI on port 8080, and a temporary admin account whose password is printed <em>once</em> to the log. Two ways to get it:</p>
+<pre><code># Option A: read it from the journal (printed exactly once, at first start)
+sudo journalctl -u stalwart -n 200 | grep -A8 'bootstrap mode'</code></pre>
+<pre><code># Option B: decide it yourself before first start, with a systemd drop-in
+sudo systemctl edit stalwart
+# in the editor, add:
+#   [Service]
+#   Environment=STALWART_RECOVERY_ADMIN=admin:choose-a-temporary-password
+sudo systemctl daemon-reload
+sudo systemctl restart stalwart</code></pre>
+<p><code>systemctl edit</code> creates an override file under <code>/etc/systemd/system/stalwart.service.d/</code> without touching the unit the installer wrote, so upgrades won't clobber it. Remove the drop-in once the wizard is done; the temporary account stops working after setup anyway.</p>
+<h3>Opening the UI, privately</h3>
+<p>From the laptop, over Tailscale: <code>http://100.72.72.58:8080/admin</code>. This is plain HTTP, which is fine <em>only</em> because the connection is inside the WireGuard tunnel Tailscale provides. Nothing about this URL is reachable from the public internet; there is no port forward, no tunnel ingress, no DNS record.</p>
+<div class="callout warn"><div class="label">The UI downloads itself</div>
+<p>Stalwart fetches its web UI bundle from GitHub on first start. If <code>srv1</code> cannot reach GitHub over HTTPS, <code>/admin</code> returns 404 and it looks broken. Check <code>curl -sI https://github.com | head -1</code> before suspecting anything else.</p></div>
+<div class="checkpoint"><div class="label">Checkpoint 3</div>
+<ul>
+<li><code>systemctl status stalwart</code> is <code>active (running)</code>.</li>
+<li><code>sudo ss -tlnp | grep 8080</code> shows <code>stalwart</code> listening.</li>
+<li>The admin login page renders in the laptop's browser at <code>http://100.72.72.58:8080/admin</code> and the bootstrap credentials get in.</li>
+</ul></div>
+</section>
+
+<section id="wizard">
+<h2><span class="num">4.</span> The setup wizard</h2>
+<p>The wizard writes <code>config.json</code>, which in Stalwart's model is tiny: it only says where the database is. Everything else, listeners, domains, accounts, TLS, lives in that database and is edited through the UI or CLI (part 04 explains why). My answers:</p>
+<table>
+<thead><tr><th>Wizard asks</th><th>Answer</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>Server hostname</td><td><code>mail.22112002.xyz</code></td><td>The name in EHLO, in the certificate, in the MX record and in the PTR record. All four must agree.</td></tr>
+<tr><td>Default domain</td><td><code>22112002.xyz</code></td><td>The part after the @.</td></tr>
+<tr><td>Storage backend</td><td>RocksDB, <code>/var/lib/stalwart/</code></td><td>Embedded, zero extra services, right for one node. Backing it up is backing up a directory.</td></tr>
+<tr><td>Directory</td><td>Internal</td><td>Accounts live in Stalwart itself. No LDAP, no SQL user table to maintain.</td></tr>
+<tr><td>Administrator password</td><td>Long, from the password manager</td><td>This becomes the permanent admin. The bootstrap one dies on restart.</td></tr>
+</tbody>
+</table>
+<h3>Keeping the admin reachable after the wizard</h3>
+<p>After the wizard Stalwart restarts into normal operation, moves the admin UI to <code>https://&lt;hostname&gt;/admin</code>, and stops serving administration on 8080. For most people that's an improvement. For me it's a problem: <code>mail.22112002.xyz</code> will resolve, in public DNS, to the <em>VPS</em>, and I do not want HTTPS on 443 open at the front door just to reach an admin page.</p>
+<p>The plan: keep a plain HTTP listener bound to loopback only, and let Tailscale publish it inside the tailnet with a real certificate.</p>
+<ol>
+  <li>In the UI: Settings › Network › Listeners. Make sure there is an <code>http</code> listener bound to <code>127.0.0.1:8080</code>. If the wizard removed it, add one.</li>
+  <li>On <code>srv1</code>: <pre><code>sudo tailscale serve --bg http://127.0.0.1:8080
+tailscale serve status</code></pre></li>
+  <li>From the laptop: <code>https://srv1.&lt;tailnet&gt;.ts.net/admin</code>. Tailscale terminates HTTPS with a Let's Encrypt certificate it obtains for the MagicDNS name, and only tailnet members can connect.</li>
+</ol>
+<div class="callout verify"><div class="label">Verify at build time</div>
+<p>Two things I could not confirm from the docs: the exact screens and order of the wizard, and whether a <code>127.0.0.1:8080</code> HTTP listener survives the wizard or has to be re-added. Also, <code>tailscale serve</code> requires HTTPS certificates to be enabled for the tailnet in the Tailscale admin console (DNS → HTTPS Certificates); if the <code>serve</code> command complains, that's where to look.</p></div>
+<div class="checkpoint"><div class="label">Checkpoint 4</div>
+<ul>
+<li><code>cat /etc/stalwart/config.json</code> exists and names <code>/var/lib/stalwart/</code>.</li>
+<li><code>journalctl -u stalwart -n 50</code> shows a normal start, no "bootstrap mode".</li>
+<li><code>https://srv1.&lt;tailnet&gt;.ts.net/admin</code> loads with a valid certificate and the permanent admin password works.</li>
+</ul></div>
+</section>
+
+<section id="dns-provider">
+<h2><span class="num">5.</span> Tell Stalwart it may edit the zone</h2>
+<p>Settings › Network › DNS › DNS Providers → add → Cloudflare. Paste the token from step 2. Give the provider an id I'll recognise later, such as <code>cloudflare</code>. This creates what Stalwart calls a <em>DnsServer</em> object: a provider type plus credentials, which domains can then point at.</p>
+<div class="checkpoint"><div class="label">Checkpoint 5</div>
+<ul>
+<li>The provider saves without an authentication error. Nothing is in the zone yet; that happens when the domain is added.</li>
+</ul></div>
+</section>
+
+<section id="acme">
+<h2><span class="num">6.</span> Tell Stalwart how to get certificates</h2>
+<p>Settings › TLS › ACME Providers → add. Let's Encrypt, challenge type <strong>DNS-01</strong>, contact email a real address I read (Let's Encrypt sends expiry warnings there). This is the step that makes the whole "no open ports at home" design possible: with DNS-01, Let's Encrypt proves I own the name by checking a TXT record Stalwart writes to the zone through the provider from step 5. No port 80, no port 443, nothing reachable from outside required.</p>
+<div class="callout tip"><div class="label">Why not the usual HTTP-01</div>
+<p>HTTP-01 needs Let's Encrypt to fetch <code>http://mail.22112002.xyz/.well-known/acme-challenge/...</code> on port 80. That name will point at the VPS, which has no web server, and <code>srv1</code> has no public port 80 either. TLS-ALPN-01 has the same problem on 443. DNS-01 is not a workaround here; it is the correct choice.</p></div>
+<div class="checkpoint"><div class="label">Checkpoint 6</div>
+<ul>
+<li>The ACME provider saves. Certificates are requested per domain, so nothing is issued yet.</li>
+</ul></div>
+</section>
+
+<section id="domain">
+<h2><span class="num">7.</span> Add the domain</h2>
+<p>Directory › Domains → add <code>22112002.xyz</code>. Two settings matter:</p>
+<ul>
+  <li><strong>DNS management: Automatic</strong>, DnsServer = the Cloudflare provider. Stalwart will publish MX, SPF, DKIM, DMARC, SRV, MTA-STS, TLS-RPT, CAA and autoconfig records itself.</li>
+  <li><strong>Certificate management: Automatic</strong>, ACME provider = the Let's Encrypt one. It will request a certificate for <code>mail.22112002.xyz</code> via DNS-01 and renew it on a schedule.</li>
+</ul>
+<p>Then open the Cloudflare DNS dashboard in another tab and watch records appear. The domain object also has a read-only <code>dnsZoneFile</code> field showing exactly what Stalwart expects the zone to contain, which is the thing to compare against.</p>
+<div class="callout danger"><div class="label">From this moment, mail to the domain changes behaviour</div>
+<p>Stalwart publishes an MX record pointing at <code>mail.22112002.xyz</code>. That name has <strong>no A record yet</strong>; it gets one in part 08 when the VPS exists. Until then, anyone sending to <code>@22112002.xyz</code> gets a bounce or their server queues and retries for a few days. That is acceptable for me because nobody uses this domain for mail yet. If a domain already receives mail somewhere else, do this step and part 08 in one sitting, or set up the front door first.</p></div>
+<div class="callout tip"><div class="label">DMARC: start at <code>p=none</code></div>
+<p>Part 03 explains DMARC. The short version: begin by asking receivers to <em>report</em> failures, not reject them. Check the DMARC record Stalwart published and make sure it says <code>p=none</code> with an <code>rua=</code> address that exists. Tighten to <code>quarantine</code> and then <code>reject</code> only after a few weeks of clean reports.</p></div>
+<div class="checkpoint"><div class="label">Checkpoint 7</div>
+<ul>
+<li><code>dig +short MX 22112002.xyz</code> returns <code>mail.22112002.xyz.</code> (with a priority number in front).</li>
+<li><code>dig +short TXT 22112002.xyz</code> includes a <code>v=spf1</code> record and <code>dig +short TXT _dmarc.22112002.xyz</code> includes <code>v=DMARC1</code>.</li>
+<li>A DKIM selector record exists: find the selector name in the domain's DNS view and <code>dig +short TXT &lt;selector&gt;._domainkey.22112002.xyz</code> returns a <code>v=DKIM1</code> record.</li>
+<li>Settings › TLS › Certificates shows an issued certificate for <code>mail.22112002.xyz</code>. If it's still pending, <code>journalctl -u stalwart -f</code> shows the ACME exchange and any DNS propagation wait.</li>
+</ul></div>
+</section>
+
+<section id="listeners">
+<h2><span class="num">8.</span> Listeners: which port, on which address, for whom</h2>
+<p>This is where the architecture from part 05 becomes concrete. Stalwart can bind each listener to a specific address, and I'm using that deliberately. There are three audiences and each gets its own door.</p>
+<figure>
+<svg viewBox="0 0 960 360" role="img" aria-label="Listener map. Public-facing listeners on the Tailscale IP 100.72.72.58 ports 25, 465, 993 are reached only by the VPS's HAProxy and trust the PROXY protocol from it. Loopback listeners on 127.0.0.1 ports 143 and 587 are reached only by Roundcube. A loopback HTTP listener on 8080 is reached by the admin through Tailscale Serve. Nothing binds to 0.0.0.0.">
+  <rect x="20" y="20" width="920" height="320" class="box2"/>
+  <text x="35" y="45" class="title">Stalwart on srv1: three doors, nothing on 0.0.0.0</text>
+
+  <rect x="40" y="70" width="280" height="130" class="box"/>
+  <text x="55" y="93" class="secc">Bound to 100.72.72.58 (Tailscale)</text>
+  <text x="55" y="115" class="mono">:25   smtp        STARTTLS</text>
+  <text x="55" y="133" class="mono">:465  submissions implicit TLS</text>
+  <text x="55" y="151" class="mono">:993  imap        implicit TLS</text>
+  <text x="55" y="175" class="muted">PROXY protocol trusted from</text>
+  <text x="55" y="191" class="mono muted">&lt;vps-tailscale-ip&gt; only</text>
+
+  <rect x="340" y="70" width="280" height="130" class="box"/>
+  <text x="355" y="93" class="good">Bound to 127.0.0.1 (loopback)</text>
+  <text x="355" y="115" class="mono">:143  imap        STARTTLS</text>
+  <text x="355" y="133" class="mono">:587  submission  STARTTLS</text>
+  <text x="355" y="175" class="muted">no PROXY protocol: the client</text>
+  <text x="355" y="191" class="muted">really is 127.0.0.1</text>
+
+  <rect x="640" y="70" width="280" height="130" class="box"/>
+  <text x="655" y="93" class="accent">Bound to 127.0.0.1 (loopback)</text>
+  <text x="655" y="115" class="mono">:8080 http        /admin /account</text>
+  <text x="655" y="175" class="muted">published inside the tailnet by</text>
+  <text x="655" y="191" class="mono muted">tailscale serve</text>
+
+  <rect x="40" y="250" width="280" height="56" class="box"/>
+  <text x="55" y="273">HAProxy on the VPS</text>
+  <text x="55" y="291" class="muted">part 08 · the only public entry</text>
+  <rect x="340" y="250" width="280" height="56" class="box"/>
+  <text x="355" y="273">Roundcube (PHP-FPM)</text>
+  <text x="355" y="291" class="muted">same machine</text>
+  <rect x="640" y="250" width="280" height="56" class="box"/>
+  <text x="655" y="273">Me, from the laptop</text>
+  <text x="655" y="291" class="mono muted">https://srv1.&lt;tailnet&gt;.ts.net/admin</text>
+
+  <path d="M180 250 V200" class="edge ts" marker-end="url(#a)"/>
+  <path d="M480 250 V200" class="edge ok" marker-end="url(#a)"/>
+  <path d="M780 250 V200" class="edge http" marker-end="url(#a)"/>
+  <text x="35" y="330" class="muted">The 0.0.0.0 door would also be reachable from the home LAN and from any other tailnet device; binding to specific addresses means every connection has a known origin.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Each listener binds to one address and serves one audience. Who can connect is decided by the bind address before any authentication happens.</figcaption>
+</figure>
+<p>Settings › Network › Listeners. The set I'm creating:</p>
+<table>
+<thead><tr><th>Listener</th><th>Protocol</th><th>Bind</th><th>TLS</th><th>PROXY protocol</th><th>Who connects</th></tr></thead>
+<tbody>
+<tr><td><code>smtp</code></td><td>smtp</td><td><code>100.72.72.58:25</code></td><td>STARTTLS</td><td>trusted from <code>&lt;vps-tailscale-ip&gt;</code></td><td>HAProxy, part 08</td></tr>
+<tr><td><code>submissions</code></td><td>smtp</td><td><code>100.72.72.58:465</code></td><td>implicit</td><td>trusted from <code>&lt;vps-tailscale-ip&gt;</code></td><td>HAProxy, part 08</td></tr>
+<tr><td><code>imaptls</code></td><td>imap</td><td><code>100.72.72.58:993</code></td><td>implicit</td><td>trusted from <code>&lt;vps-tailscale-ip&gt;</code></td><td>HAProxy, part 08</td></tr>
+<tr><td><code>imap-local</code></td><td>imap</td><td><code>127.0.0.1:143</code></td><td>STARTTLS</td><td>none</td><td>Roundcube</td></tr>
+<tr><td><code>submission-local</code></td><td>smtp</td><td><code>127.0.0.1:587</code></td><td>STARTTLS</td><td>none</td><td>Roundcube</td></tr>
+<tr><td><code>http</code></td><td>http</td><td><code>127.0.0.1:8080</code></td><td>none (Tailscale adds it)</td><td>none</td><td>Me, via <code>tailscale serve</code></td></tr>
+</tbody>
+</table>
+<h3>Why the Tailscale IP and not 0.0.0.0</h3>
+<p>Binding to <code>0.0.0.0</code> means "every address this machine has": the LAN address, the Tailscale address, loopback. Then anything on my home network could talk SMTP to the server, and so could every other device in the tailnet. By binding the mail listeners to <code>100.72.72.58</code> only, the only machines that can even open a connection are tailnet members, and in part 08 the PROXY-protocol trust narrows the real traffic to the VPS alone. The bind address is the first firewall, before any password is checked.</p>
+<h3>About the PROXY protocol setting</h3>
+<p>Stalwart has a server-wide <code>proxyTrustedNetworks</code> list (Settings › Network › General) and a per-listener <code>overrideProxyTrustedNetworks</code> that replaces it for that listener. The three Tailscale-bound listeners will get the VPS's Tailscale IP in their override, so that HAProxy can hand over the real sender's IP (part 05). I don't know that IP until the VPS exists, so for now those listeners get created with the field empty and I come back to them in part 08. The loopback listeners must <em>never</em> have it set, because Roundcube does not send a PROXY header.</p>
+<div class="callout verify"><div class="label">Verify at build time</div>
+<p>Whether a listener with a trusted-proxy list set will also accept a plain connection without a PROXY header from that network. The docs describe the trust list but not the behaviour for a non-PROXY connection from a trusted address. Until part 08 I'm testing the Tailscale listeners from the laptop directly, which only works if either the list is empty or non-PROXY connections are tolerated. The checkpoint in step 11 settles it.</p></div>
+<p>After saving listeners, the change needs a settings reload (there's a Reload action in the UI, or restart the service):</p>
+<pre><code>sudo systemctl restart stalwart
+sudo ss -tlnp | grep stalwart</code></pre>
+<div class="checkpoint"><div class="label">Checkpoint 8</div>
+<ul>
+<li><code>ss</code> shows exactly these binds: <code>100.72.72.58:25</code>, <code>100.72.72.58:465</code>, <code>100.72.72.58:993</code>, <code>127.0.0.1:143</code>, <code>127.0.0.1:587</code>, <code>127.0.0.1:8080</code>. No <code>0.0.0.0</code> or <code>*</code> lines belonging to stalwart.</li>
+<li>From the laptop, <code>nc -vz 100.72.72.58 993</code> connects, and <code>nc -vz 10.0.0.10 993</code> (the LAN address, from a device on the LAN) does not.</li>
+</ul></div>
+</section>
+
+<section id="accounts">
+<h2><span class="num">9.</span> Accounts</h2>
+<p>Directory › Accounts → add. Two to begin with:</p>
+<ul>
+  <li><code>olwethu@22112002.xyz</code>, the real one, with a long password from the password manager.</li>
+  <li><code>test@22112002.xyz</code>, a throwaway, so every test in this part sends between two mailboxes on the same machine and nothing leaves the house.</li>
+</ul>
+<p>Stalwart supports app passwords (per-device secrets managed from the <code>/account</code> page). The plan is that the phone and Thunderbird each get their own in part 08, so revoking one device never means changing the main password. Roundcube uses the main login because it's on the same box and I type it anyway.</p>
+<div class="checkpoint"><div class="label">Checkpoint 9</div>
+<ul>
+<li>Both accounts appear under Directory › Accounts with the domain <code>22112002.xyz</code>.</li>
+<li>Logging in to <code>https://srv1.&lt;tailnet&gt;.ts.net/account</code> as <code>test@22112002.xyz</code> works.</li>
+</ul></div>
+</section>
+
+<section id="roundcube">
+<h2><span class="num">10.</span> Roundcube, Caddy, tunnel</h2>
+<p>Everything in part 06, in order: PHP extensions, tarball to <code>/var/www/webmail.22112002.xyz</code>, database and schema, <code>config.inc.php</code> pointing at <code>127.0.0.1:143</code> and <code>127.0.0.1:587</code> with <code>peer_name</code> set to <code>mail.22112002.xyz</code>, Caddy block with explicit <code>:80</code> and the private-path deny, <code>cloudflared tunnel route dns homelab webmail.22112002.xyz</code>, the ingress line, restart <code>cloudflared</code>, delete <code>installer/</code>.</p>
+<pre><code>sudo caddy validate --config /etc/caddy/Caddyfile &amp;&amp; sudo systemctl reload caddy
+sudo systemctl restart cloudflared
+curl -I https://webmail.22112002.xyz</code></pre>
+<p>Then the moment that proves the home half: log in to <code>https://webmail.22112002.xyz</code> as <code>test@22112002.xyz</code>, send a message to <code>olwethu@22112002.xyz</code>, log out, log in as Olwethu, read it. That message went browser → Cloudflare → tunnel → Caddy → PHP → Roundcube → loopback SMTP 587 → Stalwart → mailbox → loopback IMAP 143 → Roundcube → back out the tunnel. Every component in this part was exercised, and the public internet carried nothing but HTTPS.</p>
+<div class="checkpoint"><div class="label">Checkpoint 10</div>
+<ul>
+<li><code>curl -I https://webmail.22112002.xyz</code> returns <code>200</code> (a Cloudflare <code>1033</code> means the tunnel is fine and nothing is listening locally; <code>502</code> from Caddy means PHP-FPM; check the socket name).</li>
+<li>Login works for both accounts.</li>
+<li>A message from <code>test@</code> arrives in <code>olwethu@</code>'s inbox within seconds, and viewing its headers shows a <code>DKIM-Signature</code> line for <code>d=22112002.xyz</code>, proving signing is on even for local mail.</li>
+<li><code>https://webmail.22112002.xyz/installer/</code> returns 403 or 404.</li>
+</ul></div>
+</section>
+
+<section id="direct-tests">
+<h2><span class="num">11.</span> Testing the Tailscale doors directly</h2>
+<p>Roundcube proved the loopback listeners. The three Tailscale-bound listeners are what the VPS will use, and I want them proven before I pay for the VPS. From the laptop:</p>
+<h3>Is the certificate the right one?</h3>
+<pre><code>openssl s_client -connect 100.72.72.58:993 -servername mail.22112002.xyz &lt;/dev/null 2&gt;/dev/null \
+  | openssl x509 -noout -subject -issuer -dates</code></pre>
+<p>Expected: subject <code>CN = mail.22112002.xyz</code>, issuer Let's Encrypt, dates covering today. If the issuer is Stalwart's own self-signed fallback, the ACME step hasn't completed; check the journal.</p>
+<h3>Can I send through 465 with a login?</h3>
+<pre><code>sudo apt install -y swaks   # on the laptop
+swaks --to olwethu@22112002.xyz --from test@22112002.xyz \
+      --server 100.72.72.58:465 --tls-on-connect \
+      --auth --auth-user test@22112002.xyz \
+      --header "Subject: swaks over tailscale"</code></pre>
+<p>swaks prints the entire SMTP conversation, which is the best way I know to <em>see</em> what part 02 describes: EHLO, the server's capability list, AUTH, MAIL FROM, RCPT TO, DATA, and the queued-message reply.</p>
+<h3>Does 25 answer like a real MX?</h3>
+<pre><code>swaks --to olwethu@22112002.xyz --from someone@example.org --server 100.72.72.58:25 --tls</code></pre>
+<p>This is unauthenticated, like Gmail would be. Stalwart should accept it because the recipient is local. Try <code>--to nobody@gmail.com</code> too: that must be <strong>refused</strong> with a relay-denied style error. If it isn't, the server is an open relay and nothing else matters until that's fixed.</p>
+<div class="checkpoint"><div class="label">Checkpoint 11</div>
+<ul>
+<li><code>openssl</code> shows a Let's Encrypt certificate for <code>mail.22112002.xyz</code>.</li>
+<li>Authenticated swaks on 465 ends with a <code>250</code> queued reply and the message appears in webmail.</li>
+<li>Unauthenticated swaks on 25 to a local address is accepted; to an external address it is rejected.</li>
+<li>Note for part 08: whether these tests worked with the PROXY trust list empty (expected) and what happens once it is set.</li>
+</ul></div>
+</section>
+
+<section id="backups">
+<h2><span class="num">12.</span> Backups, before there is anything worth losing</h2>
+<p>The whole server is two paths: <code>/etc/stalwart/config.json</code> (a few bytes saying where the database is) and <code>/var/lib/stalwart/</code> (the RocksDB database: configuration, accounts, every message). Roundcube adds its MariaDB database and its config file. A nightly copy to somewhere that is not the same spinning disk is the minimum.</p>
+<pre><code>sudo tee /usr/local/sbin/backup-mail.sh &gt;/dev/null &lt;&lt;'SH'
+#!/bin/sh
+set -e
+DEST=/mnt/backup/mail/$(date +%F)
+mkdir -p "$DEST"
+systemctl stop stalwart
+tar czf "$DEST/stalwart.tgz" /etc/stalwart /var/lib/stalwart
+systemctl start stalwart
+mariadb-dump roundcubemail | gzip &gt; "$DEST/roundcube.sql.gz"
+cp /var/www/webmail.22112002.xyz/config/config.inc.php "$DEST/"
+find /mnt/backup/mail -maxdepth 1 -mtime +14 -exec rm -rf {} +
+SH
+sudo chmod 700 /usr/local/sbin/backup-mail.sh</code></pre>
+<p>Stopping the service for the few seconds the tar takes is the simple way to get a consistent copy of RocksDB; Stalwart also has its own backup and snapshot tooling in the UI, which I'll look at once the basics are stable. Where <code>/mnt/backup</code> actually points is the open question: the RAM-upgrade post already said an SSD is the next hardware step, and a second disk for backups is the same conversation.</p>
+<div class="checkpoint"><div class="label">Checkpoint 12</div>
+<ul>
+<li>Running the script by hand produces the three files and <code>systemctl status stalwart</code> is running again afterwards.</li>
+<li>A cron or systemd timer entry exists and <code>journalctl</code> shows it fired the next night.</li>
+</ul></div>
+</section>
+
+<section id="not-yet">
+<h2><span class="num">13.</span> Deliberately not done yet</h2>
+<p>If everything above passed, I have a working mail system that only I can reach. These are the pieces that make it reachable by the world, and they are all part 08 because they all need the VPS to exist first:</p>
+<ul>
+  <li>An <strong>A record</strong> for <code>mail.22112002.xyz</code> pointing at <code>&lt;vps-public-ip&gt;</code>, grey cloud.</li>
+  <li>A <strong>PTR record</strong> at the provider, mapping <code>&lt;vps-public-ip&gt;</code> back to <code>mail.22112002.xyz</code>.</li>
+  <li><strong>HAProxy</strong> on the VPS forwarding 25, 465 and 993 to <code>100.72.72.58</code> with PROXY protocol v2.</li>
+  <li>The <code>overrideProxyTrustedNetworks</code> value on the three Tailscale listeners.</li>
+  <li>A <strong>Postfix relay</strong> on the VPS and a Stalwart <em>Relay</em> route so outbound mail leaves from the VPS's IP.</li>
+  <li>Confirming the <strong>SPF</strong> record Stalwart published covers the VPS IP (it uses <code>mx</code>, which will resolve to it once the A record exists).</li>
+  <li>The first real message to a Gmail address, and reading its headers.</li>
+</ul>
+<p>Until then the domain receives nothing from outside, and that is by design: there is no point exposing a mail server to the internet before I've proven, privately, that it does what I think it does.</p>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Bootstrap mode</dt><dd>Stalwart's first-start state when no <code>config.json</code> exists: web UI only on port 8080, a one-time admin password in the log, no mail services until the wizard finishes.</dd>
+<dt>Checkpoint</dt><dd>A command whose output proves a step worked. The discipline of not moving on without one.</dd>
+<dt>DNS-01</dt><dd>The ACME challenge where ownership of a name is proven by writing a TXT record, so no port needs to be reachable from the internet.</dd>
+<dt>DnsServer / ACME provider</dt><dd>Stalwart's names for "credentials to edit a DNS zone" and "which certificate authority to ask, with which challenge". Domains point at both.</dd>
+<dt>Bind address</dt><dd>The specific IP a listener accepts connections on. Binding to one address instead of <code>0.0.0.0</code> limits who can even connect.</dd>
+<dt><code>overrideProxyTrustedNetworks</code></dt><dd>Per-listener list of proxies allowed to send a PROXY protocol header with the real client address. Set in part 08 to the VPS's Tailscale IP.</dd>
+<dt><code>tailscale serve</code></dt><dd>Publishes a local port to the tailnet only, with HTTPS on the device's MagicDNS name. Used here for the admin UI.</dd>
+<dt>swaks</dt><dd>"Swiss Army Knife for SMTP": a command-line tool that holds a full SMTP conversation and prints every line of it.</dd>
+<dt>Open relay</dt><dd>A mail server that accepts mail for domains it doesn't host from anyone, unauthenticated. Spammers find them within hours. The 25-to-gmail test in step 11 checks for it.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="06-roundcube.html">← 06 · Roundcube behind the tunnel</a>
+  <a href="08-build-front-door.html">08 · Build part 2: the front door →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
