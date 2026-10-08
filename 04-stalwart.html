@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · Stalwart, and the Stacks I Didn't Pick</title>
+<meta name="description" content="How Stalwart works as one binary instead of five daemons, how it stores its configuration, how it gets certificates with no open ports, and why I did not pick Postfix, Mailcow or docker-mailserver.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a class="active" href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 04 · The tools</div>
+  <h1>Stalwart, and the Stacks I Didn't Pick</h1>
+  <p class="lead">Every mail server tutorial I had ever skimmed was a tour of five separate programs stitched together with config files in five different dialects. Stalwart is one program. This part is about what that one program does, how it is configured, and why the obvious alternatives lost on a 4 GB VM that already has a job.</p>
+  <div class="meta">Facts checked against the Stalwart documentation at release v0.16.25 (5 October 2026). Anything I could not verify is marked.</div>
+</header>
+
+<section id="classic">
+<h2><span class="num">1.</span> What a mail server traditionally is</h2>
+<p>Part 02 described the life of a message: submitted, queued, handed to another server, filtered, stored, read back over IMAP. Historically each of those jobs was a separate piece of software, written by separate people, each with its own configuration language:</p>
+<table>
+<thead><tr><th>Job</th><th>Classic tool</th><th>Config lives in</th></tr></thead>
+<tbody>
+<tr><td>Accept and send SMTP, run the queue</td><td>Postfix</td><td><code>main.cf</code>, <code>master.cf</code>, assorted lookup tables</td></tr>
+<tr><td>Store mailboxes, serve IMAP, authenticate users</td><td>Dovecot</td><td><code>dovecot.conf</code> plus a <code>conf.d/</code> directory</td></tr>
+<tr><td>Spam filtering</td><td>Rspamd (or SpamAssassin)</td><td>UCL files under <code>/etc/rspamd/local.d/</code></td></tr>
+<tr><td>DKIM signing</td><td>OpenDKIM, or Rspamd's module</td><td>Its own key tables and a milter socket</td></tr>
+<tr><td>Virus scanning</td><td>ClamAV</td><td>Its own daemon and signature updates</td></tr>
+<tr><td>TLS certificates</td><td>certbot</td><td>A renewal timer and hooks to restart two daemons</td></tr>
+<tr><td>User and domain list</td><td>MySQL/MariaDB or flat files</td><td>Schema that Postfix and Dovecot both query</td></tr>
+<tr><td>Webmail</td><td>Roundcube</td><td>PHP config, its own database</td></tr>
+</tbody>
+</table>
+<p>None of these tools are bad. Postfix in particular is one of the most carefully engineered pieces of software on the internet. The problem is the <em>seams</em>. Postfix hands to Dovecot over LMTP. Rspamd hooks into Postfix as a milter. OpenDKIM is another milter. Dovecot authenticates Postfix's submission users over a socket. Each seam is a place where two configs have to agree about a path, a port, a socket, a user name, and each one fails silently when they do not. The Homelab series already has a story about a PHP socket version mismatch that produced no error at all. A classic mail stack has about six of those seams.</p>
+
+<figure>
+<svg viewBox="0 0 960 420" role="img" aria-label="Left: eight boxes for Postfix, Dovecot, Rspamd, OpenDKIM, ClamAV, certbot, MariaDB and Roundcube, connected by many crossing edges labelled LMTP, milter, auth socket, SQL and reload hooks. Right: one box labelled Stalwart containing SMTP, IMAP, JMAP, spam filter, DKIM, ACME and storage, with Roundcube as the only separate box.">
+  <text x="20" y="35" class="title">The classic stack: eight programs, and the seams between them</text>
+  <!-- classic boxes -->
+  <rect x="20" y="60" width="130" height="46" class="box"/><text x="32" y="80">Postfix</text><text x="32" y="97" class="muted">SMTP, queue</text>
+  <rect x="200" y="60" width="130" height="46" class="box"/><text x="212" y="80">Dovecot</text><text x="212" y="97" class="muted">IMAP, mailboxes</text>
+  <rect x="380" y="60" width="130" height="46" class="box"/><text x="392" y="80">Rspamd</text><text x="392" y="97" class="muted">spam filter</text>
+  <rect x="20" y="180" width="130" height="46" class="box"/><text x="32" y="200">OpenDKIM</text><text x="32" y="217" class="muted">signing</text>
+  <rect x="200" y="180" width="130" height="46" class="box"/><text x="212" y="200">MariaDB</text><text x="212" y="217" class="muted">users, domains</text>
+  <rect x="380" y="180" width="130" height="46" class="box"/><text x="392" y="200">ClamAV</text><text x="392" y="217" class="muted">virus scan</text>
+  <rect x="20" y="300" width="130" height="46" class="box"/><text x="32" y="320">certbot</text><text x="32" y="337" class="muted">TLS renewals</text>
+  <rect x="200" y="300" width="130" height="46" class="box"/><text x="212" y="320">Roundcube</text><text x="212" y="337" class="muted">webmail</text>
+  <!-- seams -->
+  <path d="M150 83 H200" class="edge bad"/><text x="152" y="76" class="muted bad">LMTP</text>
+  <path d="M150 90 C 250 150, 300 150, 380 95" class="edge bad"/><text x="240" y="140" class="muted bad">milter</text>
+  <path d="M85 106 V180" class="edge bad"/><text x="90" y="150" class="muted bad">milter</text>
+  <path d="M265 106 V180" class="edge bad"/><text x="270" y="150" class="muted bad">SQL</text>
+  <path d="M150 203 H200" class="edge bad"/>
+  <path d="M100 106 C 120 160, 200 170, 230 180" class="edge bad"/>
+  <path d="M445 106 V180" class="edge bad"/><text x="450" y="150" class="muted bad">socket</text>
+  <path d="M85 226 V300" class="edge bad"/><text x="90" y="268" class="muted bad">reload hooks</text>
+  <path d="M150 323 C 170 280, 180 120, 200 100" class="edge bad"/>
+  <path d="M265 300 V226" class="edge bad"/><text x="270" y="268" class="muted bad">its own DB</text>
+  <path d="M330 323 C 420 320, 430 130, 330 90" class="edge bad"/><text x="400" y="260" class="muted bad">IMAP + auth</text>
+  <path d="M150 66 C 250 20, 420 20, 440 60" class="edge bad"/><text x="250" y="48" class="muted bad">auth socket</text>
+  <text x="20" y="395" class="muted">Every dashed line is a place where two config files have to agree about a path, a port or a user name.</text>
+
+  <!-- stalwart -->
+  <text x="580" y="35" class="title good">Stalwart: one process</text>
+  <rect x="580" y="60" width="360" height="226" class="box2"/>
+  <text x="600" y="88" class="title">stalwart</text>
+  <text x="600" y="108" class="muted mono">/usr/local/bin/stalwart</text>
+  <rect x="600" y="125" width="100" height="26" class="pill"/><text x="612" y="143">SMTP</text>
+  <rect x="710" y="125" width="100" height="26" class="pill"/><text x="722" y="143">IMAP / POP3</text>
+  <rect x="820" y="125" width="100" height="26" class="pill"/><text x="832" y="143">JMAP</text>
+  <rect x="600" y="160" width="100" height="26" class="pill"/><text x="612" y="178">spam filter</text>
+  <rect x="710" y="160" width="100" height="26" class="pill"/><text x="722" y="178">DKIM</text>
+  <rect x="820" y="160" width="100" height="26" class="pill"/><text x="832" y="178">ACME / TLS</text>
+  <rect x="600" y="195" width="100" height="26" class="pill"/><text x="612" y="213">Sieve</text>
+  <rect x="710" y="195" width="100" height="26" class="pill"/><text x="722" y="213">DNS publish</text>
+  <rect x="820" y="195" width="100" height="26" class="pill"/><text x="832" y="213">CalDAV/CardDAV</text>
+  <rect x="600" y="235" width="320" height="34" class="box"/><text x="612" y="257">RocksDB: config, users, mailboxes, queue</text>
+  <rect x="580" y="300" width="160" height="46" class="box"/><text x="592" y="320">Roundcube</text><text x="592" y="337" class="muted">still separate</text>
+  <path d="M660 300 V286" class="edge ok" marker-end="url(#a)"/>
+  <text x="750" y="325" class="muted">One seam left: IMAP and</text>
+  <text x="750" y="342" class="muted">submission on loopback.</text>
+  <text x="580" y="395" class="muted">Same jobs, one config model, one log, one service to restart.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The job list is the same on both sides. What changes is how many places a mistake can hide.</figcaption>
+</figure>
+</section>
+
+<section id="what-stalwart-is">
+<h2><span class="num">2.</span> What Stalwart is</h2>
+<p>Stalwart is a mail and collaboration server written in Rust, released as a single binary. One process speaks <strong>SMTP</strong> (receiving, submission and outbound delivery), <strong>IMAP4</strong>, <strong>POP3</strong>, <strong>JMAP</strong> (the modern JSON replacement for IMAP), <strong>ManageSieve</strong> (server-side filter rules), and <strong>CalDAV, CardDAV and WebDAV</strong> for calendars, contacts and files. It is dual-licensed: AGPL-3.0 for everyone, plus a paid enterprise licence for features I do not need.</p>
+<p>It stores everything in a database backend of your choice: RocksDB (embedded, single node, what I use), FoundationDB, PostgreSQL, MySQL, SQLite, or an S3-compatible bucket for message bodies. For one VM with one disk, RocksDB means no extra service to run.</p>
+<p>The resource numbers are what made it fit this project. The documentation states roughly <strong>100 MB of RAM idle</strong>, that <strong>1 GB is "generally sufficient" for 5 to 10 users</strong>, and that a single CPU core is enough for around 5 users. <code>srv1</code> has 4 GB shared with Caddy, PHP-FPM, MariaDB and the tunnel. A mail server that wants a quarter of that is fine. One that recommends 6 GB on its own is not.</p>
+</section>
+
+<section id="config-model">
+<h2><span class="num">3.</span> How it is configured, and why that surprised me</h2>
+<p>I expected a big TOML file. Older Stalwart versions had one, and most blog posts still show it. The current model is different, and it is worth understanding before touching anything, because "where is the config?" has a two-part answer.</p>
+<p><strong>Part one: a tiny file.</strong> <code>/etc/stalwart/config.json</code> holds only one thing, the location of the data store:</p>
+<pre><code>{"@type":"RocksDb","path":"/var/lib/stalwart/"}</code></pre>
+<p><strong>Part two: the database.</strong> On start, Stalwart reads that file, opens the store, and loads <em>everything else</em> from it: domains, accounts, listeners, TLS certificates, spam rules, routes, rate limits. Each of those is a typed object (a <code>Domain</code>, a <code>NetworkListener</code>, an <code>MtaRoute</code>, and so on). You edit them through the <strong>WebUI</strong> at <code>/admin</code>, or through <code>stalwart-cli</code>, both of which talk to the server's JMAP management API. Some settings are compiled into the running core and only apply after a <code>ReloadSettings</code> action; the WebUI tells you when that is needed.</p>
+
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Flow: config.json points at the RocksDB data store; the data store holds typed configuration objects such as Domain, NetworkListener, AcmeProvider, DnsServer and MtaRoute; those are edited through the WebUI at /admin or stalwart-cli over the JMAP management API; some changes need a ReloadSettings action.">
+  <rect x="20" y="40" width="220" height="90" class="box"/>
+  <text x="35" y="65" class="title">/etc/stalwart/config.json</text>
+  <text x="35" y="90" class="mono">{"@type":"RocksDb",</text>
+  <text x="35" y="108" class="mono"> "path":"/var/lib/stalwart/"}</text>
+  <text x="35" y="150" class="muted">The only file. Says where the store is.</text>
+  <path d="M240 85 H300" class="edge ok" marker-end="url(#a)"/>
+  <rect x="300" y="30" width="300" height="200" class="box2"/>
+  <text x="315" y="55" class="title">RocksDB at /var/lib/stalwart/</text>
+  <rect x="315" y="70" width="130" height="26" class="pill"/><text x="327" y="88">Domain</text>
+  <rect x="455" y="70" width="130" height="26" class="pill"/><text x="467" y="88">Account</text>
+  <rect x="315" y="104" width="130" height="26" class="pill"/><text x="327" y="122">NetworkListener</text>
+  <rect x="455" y="104" width="130" height="26" class="pill"/><text x="467" y="122">AcmeProvider</text>
+  <rect x="315" y="138" width="130" height="26" class="pill"/><text x="327" y="156">DnsServer</text>
+  <rect x="455" y="138" width="130" height="26" class="pill"/><text x="467" y="156">MtaRoute</text>
+  <rect x="315" y="172" width="270" height="26" class="pill"/><text x="327" y="190">...plus mailboxes, queue, certificates</text>
+  <text x="315" y="222" class="muted">Everything else is an object in here.</text>
+  <path d="M600 130 H660" class="edge" marker-end="url(#a)"/>
+  <text x="604" y="122" class="muted">JMAP API</text>
+  <rect x="660" y="40" width="280" height="56" class="box"/>
+  <text x="675" y="63">WebUI</text>
+  <text x="675" y="81" class="mono">https://&lt;hostname&gt;/admin</text>
+  <rect x="660" y="120" width="280" height="56" class="box"/>
+  <text x="675" y="143">stalwart-cli</text>
+  <text x="675" y="161" class="muted">same API, for scripts</text>
+  <rect x="660" y="200" width="280" height="56" class="box"/>
+  <text x="675" y="223" class="warnc">ReloadSettings action</text>
+  <text x="675" y="241" class="muted">needed for core settings, not for accounts</text>
+  <text x="20" y="280" class="muted">Consequence: "grep the config" becomes "open the admin UI and search". The search box at the top of the WebUI finds settings by name.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Two-part configuration: a one-line file to find the database, and the database holds the rest.</figcaption>
+</figure>
+
+<div class="callout warn"><div class="label">Honest tradeoff</div>
+<p>I like being able to <code>grep</code> a config directory, and with Stalwart I mostly cannot. The upside is that the WebUI validates each object as you save it, so the class of mistake where a typo in a file takes a service down on reload is mostly gone. Caddy's <code>caddy validate</code> taught me how much that is worth. The downside is that the mental model from every Postfix tutorial does not transfer.</p></div>
+</section>
+
+<section id="bootstrap">
+<h2><span class="num">4.</span> First start: bootstrap mode</h2>
+<p>Installation is one script. It downloads the binary to <code>/usr/local/bin/stalwart</code>, creates <code>/var/lib/stalwart/</code> for data and <code>/var/log/stalwart/</code> for logs, and installs a systemd unit:</p>
+<pre><code>curl --proto '=https' --tlsv1.2 -sSf https://get.stalw.art/install.sh -o install.sh
+sudo sh install.sh</code></pre>
+<p>Because there is no <code>config.json</code> yet, the first start enters <strong>bootstrap mode</strong>. No mail services run. The server listens on plain HTTP port 8080 (changeable with <code>STALWART_RECOVERY_MODE_PORT</code>) and serves only the WebUI and management API. It generates a temporary administrator account and prints the password <em>once</em> to standard output. On systemd that means:</p>
+<pre><code>sudo journalctl -u stalwart -n 200 | grep -A8 'bootstrap mode'</code></pre>
+<p>If you would rather not fish a password out of a log, pin one beforehand with the environment variable <code>STALWART_RECOVERY_ADMIN=admin:&lt;password&gt;</code> in the unit's environment.</p>
+<p>Then open <code>http://&lt;host&gt;:8080/admin</code>, log in, and the setup wizard asks for the server hostname, the default domain, the storage backend settings and the user directory. When it finishes, Stalwart writes <code>config.json</code>, creates a permanent admin account, restarts into normal operation, moves the WebUI to <code>https://&lt;hostname&gt;/admin</code>, and disables administration on port 8080. The temporary account stops working.</p>
+<div class="callout warn"><div class="label">Needs GitHub reachable</div>
+<p>The WebUI is not baked into the binary. On first start Stalwart downloads the UI bundle from GitHub over HTTPS. If <code>srv1</code> cannot reach GitHub, <code>/admin</code> and <code>/account</code> return 404 and nothing in the logs says "install the UI". The Homelab series has a DNS story that would have produced exactly this symptom.</p></div>
+</section>
+
+<section id="features">
+<h2><span class="num">5.</span> The five features that made it fit a CGNAT homelab</h2>
+<p>Any mail server can receive and store mail. These five are the ones that line up with the specific constraints from parts 01 and 03: no public ports at home, every inbound connection arriving from one relay, and outbound mail that has to leave from somewhere else.</p>
+
+<h3>5.1 Certificates with no open ports: ACME over DNS-01</h3>
+<p>Caddy gets certificates automatically because it can answer on port 80 or 443. At home I have neither open to the internet, and I am not going to. Stalwart supports four ACME challenge types, configured as <code>AcmeProvider</code> objects under <code>Settings › TLS › ACME Providers</code>:</p>
+<table>
+<thead><tr><th>Challenge</th><th>Needs a public port?</th><th>Works for me?</th></tr></thead>
+<tbody>
+<tr><td>HTTP-01</td><td>80</td><td>No</td></tr>
+<tr><td>TLS-ALPN-01</td><td>443</td><td>No</td></tr>
+<tr><td>DNS-01</td><td>None. Publishes a <code>_acme-challenge</code> TXT record, waits for propagation, removes it.</td><td><strong>Yes</strong></td></tr>
+<tr><td>DNS-PERSIST-01</td><td>None. One long-lived TXT record authorises the ACME account for the domain.</td><td>Yes, newer</td></tr>
+</tbody>
+</table>
+<p>DNS-01 requires that the domain has automatic DNS management turned on, which is the next feature. Then a <code>Domain</code> with <code>certificateManagement</code> set to Automatic gets its certificate requested and renewed by a scheduled task with no port ever opened at home.</p>
+
+<h3>5.2 Automatic DNS: Stalwart writes its own records</h3>
+<p>Part 03 lists about ten DNS records a mail domain needs, and the DKIM one is a long public key that gets rotated. Stalwart can publish and maintain all of them itself. You create a <code>DnsServer</code> object under <code>Settings › Network › DNS › DNS Providers</code> with credentials for your DNS host, then set the domain's <code>dnsManagement</code> to Automatic and point it at that provider. Cloudflare is supported, along with Route 53, Google Cloud DNS, OVH, deSEC, DigitalOcean, Bunny, Porkbun, DNSimple, Spaceship, and any RFC 2136 server. The default <code>publishRecords</code> list covers DKIM, SPF, MX, DMARC, SRV, MTA-STS, TLS-RPT, CAA, autoconfig and autodiscover. The server polls afterwards to confirm the records are visible.</p>
+<p>For <code>22112002.xyz</code> on Cloudflare this means one scoped API token and no copy-pasting of DKIM keys into the dashboard. The one record it does <em>not</em> manage is the plain A record for <code>mail.22112002.xyz</code>, which has to point at the VPS and stay DNS-only (grey cloud). That one I set by hand.</p>
+
+<h3>5.3 The spam filter is built in</h3>
+<p>No Rspamd to bolt on. The filter does DNSBL lookups, greylisting, SPF/DKIM/DMARC evaluation, a statistical classifier that learns from what you mark as spam, phishing checks, and optionally an LLM-based classifier if you point it at a model API. For this build the important part is that it sits inside the same process that receives the connection, which matters for the next feature.</p>
+
+<h3>5.4 PROXY protocol: seeing the real sender through the relay</h3>
+<p>In part 05's design every inbound connection reaches <code>srv1</code> from the VPS over Tailscale. Without help, Stalwart would see every sender as the VPS's Tailscale address, and every IP-based check would be useless: DNSBL would look up the wrong address, SPF would evaluate the wrong address, rate limiting and auto-ban would punish the VPS. HAProxy solves this with the <strong>PROXY protocol</strong>: a small header at the start of the TCP stream that says "the real client was 209.85.x.x, port such-and-such, and here is whether it used TLS". Stalwart accepts versions 1 and 2, including the version-2 TLV extensions, but only from addresses listed as trusted. That list is <code>proxyTrustedNetworks</code> on the system settings (<code>Settings › Network › General</code>) or, per listener, <code>overrideProxyTrustedNetworks</code> on the <code>NetworkListener</code>, which replaces the global list for that listener. A listener decodes either PROXY headers or <code>X-Forwarded-For</code>, never both on one connection.</p>
+
+<h3>5.5 Outbound through a relay: the MtaRoute</h3>
+<p>Outbound mail must leave from the VPS's IP, not from my house. Stalwart's outbound side is strategy-driven: for each recipient it evaluates an <code>MtaOutboundStrategy</code> that picks a queue, a retry schedule and a <em>route</em>. A route of variant <code>Relay</code> (<code>Settings › MTA › Outbound › Routes</code>) has an <code>address</code>, a <code>port</code> (default 25), a <code>protocol</code> of smtp or lmtp, <code>implicitTls</code>, <code>allowInvalidCerts</code>, and optional <code>authUsername</code> and <code>authSecret</code>. Point it at the VPS over Tailscale and every message for a remote domain gets handed there instead of looked up by MX.</p>
+<div class="callout verify"><div class="label">Verify during the build</div>
+<p>The documentation says the relay route is "selected via route expressions in <code>MtaOutboundStrategy</code>" for the recipients you choose. I have the object names but not the exact expression syntax for "every recipient that is not a local domain". Part 08 will record what the WebUI actually offered.</p></div>
+</section>
+
+<section id="roads">
+<h2><span class="num">6.</span> The stacks I didn't pick</h2>
+<div class="callout road"><div class="label">Road not taken · Postfix + Dovecot + Rspamd</div>
+<p><strong>For it:</strong> the most documented stack on earth, the most CV-relevant, decades of hardening, and every error message has a forum thread. If a future job says "mail", it says Postfix. <strong>Against it, here:</strong> five daemons and five config dialects on a 4 GB VM that is also a web server, with milter sockets and LMTP paths as the seams in figure 1. I have already lost an afternoon to one silent socket mismatch in this homelab. The <code>nginx</code> decision in the Homelab series was the same trade: fewer places to make a syntax mistake beat the more expected tool. I may still build this stack on a throwaway VM later just to have done it.</p></div>
+<div class="callout road"><div class="label">Road not taken · Mailcow</div>
+<p><strong>For it:</strong> a genuinely excellent all-in-one, with SOGo webmail and calendar, a polished admin UI, and a huge community. <strong>Against it:</strong> it is a dozen Docker containers and its own documentation recommends 6 GB of RAM or more. On a VM with 4 GB total, half already spoken for, that is not a tight fit, it is a non-fit. It would need its own VM, and then I am back to planning a second VM for mail instead of using the spare capacity I have.</p></div>
+<div class="callout road"><div class="label">Road not taken · docker-mailserver</div>
+<p><strong>For it:</strong> the sensible middle ground. Postfix, Dovecot and Rspamd pre-wired inside one container, around 600 MB of RAM, configuration in plain files you can version. It would run on <code>srv1</code>. <strong>Against it:</strong> it is still the five-daemon mental model, just with the seams pre-glued by someone else, and there is no admin UI, so account management is a shell script. It also brings Docker onto a VM that so far runs everything as plain systemd services, which the Homelab series deliberately avoided until an app needed it.</p></div>
+<div class="callout road"><div class="label">Road not taken · Maddy</div>
+<p><strong>For it:</strong> a single Go binary with the same "one process" idea, very light, a clean config file. <strong>Against it:</strong> a much smaller ecosystem, no JMAP, no built-in web admin, and less momentum. If Stalwart had not existed I would have looked hard at it.</p></div>
+<p>And Stalwart's own honest column: it is younger than any of the above, there are fewer blog posts about it, its configuration moved from a file into a database so my muscle memory is useless, and the WebUI needs GitHub reachable on first start. I am accepting all of that for one process, one log, one service to restart, DNS-01 certificates, and a PROXY-aware spam filter that fits the architecture I was forced into in part 01.</p>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Milter</dt><dd>"Mail filter": the plugin protocol Postfix and Sendmail use to call out to external programs such as Rspamd or OpenDKIM during an SMTP session. One of the seams.</dd>
+<dt>LMTP</dt><dd>Local Mail Transfer Protocol, a cut-down SMTP used to hand a message from the MTA to the program that stores it. Another seam in the classic stack.</dd>
+<dt>JMAP</dt><dd>JSON Meta Application Protocol, the IETF's modern replacement for IMAP. Stateless, HTTP-based, and what Stalwart's own account UI uses.</dd>
+<dt>RocksDB</dt><dd>An embedded key-value database that lives in a directory, no separate server. Stalwart's single-node default.</dd>
+<dt>Bootstrap mode</dt><dd>Stalwart's first-start state: no <code>config.json</code>, WebUI only on port 8080, one-time admin password printed to the log.</dd>
+<dt>ACME DNS-01</dt><dd>Proving domain control to a certificate authority by publishing a TXT record instead of answering on port 80 or 443. The only ACME method that works with no public ports.</dd>
+<dt>PROXY protocol</dt><dd>HAProxy's header at the start of a forwarded TCP connection that carries the original client's IP and TLS status, so the backend can act as if the client had connected directly.</dd>
+<dt>MtaRoute</dt><dd>Stalwart's object describing where outbound mail goes: by MX lookup, to a relay, or to local delivery.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="03-dns-and-trust.html">← 03 · DNS and trust</a>
+  <a href="05-the-front-door.html">05 · The front door →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
