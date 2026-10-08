@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · Why a Cloudflare Tunnel Can't Carry Mail</title>
+<meta name="description" content="Why the tunnel that publishes my websites cannot publish a mail server, explained from the protocol up.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a class="active" href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 01 · The problem</div>
+  <h1>Why a Cloudflare Tunnel Can't Carry Mail</h1>
+  <p class="lead">I started this project with one sentence in my head: "the websites go through the tunnel, so the mail server can too." That sentence is wrong, and understanding exactly <em>why</em> it is wrong decided the whole architecture.</p>
+  <div class="meta">Reading time about 10 minutes. No commands in this part, only ideas.</div>
+</header>
+
+<section id="assumption">
+<h2><span class="num">1.</span> The assumption I walked in with</h2>
+<p>By the time I wanted email, the homelab had a comfortable pattern. Anything I wanted the public to reach followed the same four steps: a folder under <code>/var/www</code>, a block in the Caddyfile, a hostname in the tunnel's ingress list, one <code>cloudflared tunnel route dns</code> command. CGNAT had stopped being a problem months ago, because the tunnel dials <em>out</em> and Cloudflare relays visitors <em>in</em> down that already-open connection.</p>
+<p>So the plan wrote itself: install a mail server on <code>srv1</code>, add <code>mail.22112002.xyz</code> to the tunnel, done. I had even picked the software before I checked whether the plan could work.</p>
+<p>It cannot. Not "it is hard", not "it needs a paid plan". The tunnel is the wrong shape for the protocol, and no amount of configuration changes a shape.</p>
+</section>
+
+<section id="pull-vs-push">
+<h2><span class="num">2.</span> Pulled protocols and pushed protocols</h2>
+<p>The thing I had never thought about is <strong>who starts the conversation</strong>.</p>
+<p>When somebody visits <code>22112002.xyz</code>, <em>their browser</em> starts it. It opens a connection to whatever IP the DNS name points at, says "GET / please", and waits. The server only ever answers. Every website on the internet works this way, which is why a tunnel can publish a website at all: Cloudflare's edge is the thing the browser connects to, and Cloudflare already has a line open to my VM to pass the request down. The browser never needs to reach my house. It needs to reach Cloudflare, and Cloudflare is very reachable.</p>
+<p>Email is the opposite. When Gmail has a message for <code>me@22112002.xyz</code>, <em>Gmail</em> starts the conversation. Its server looks up which machine handles mail for my domain, opens a TCP connection to that machine on <strong>port 25</strong>, and starts talking SMTP. Nobody asked it to; it decided to, because it had a message to deliver. The receiving side has to be a machine with a real, routable address that accepts an inbound connection on port 25 from any server in the world, at any time.</p>
+<p>That is exactly the thing CGNAT takes away. Not "a port" in general, but <em>the ability for the outside world to initiate</em>. The Homelab series worked around that for the web because the web does not need my house to accept anything: Cloudflare accepts, and my VM collects. Mail does not have a Cloudflare in the middle. The sender wants my MX host, directly, on 25.</p>
+
+<figure>
+<svg viewBox="0 0 960 400" role="img" aria-label="Two diagrams. Top: a browser connects to Cloudflare, which relays the HTTP request down an outbound tunnel to srv1 behind the CGNAT wall; this works. Bottom: Gmail's server tries to connect on port 25 directly to srv1 and hits the CGNAT wall; there is no tunnel in that path.">
+  <!-- wall -->
+  <rect x="600" y="20" width="14" height="360" class="wall"/>
+  <text x="593" y="395" class="muted">CGNAT: nothing from outside can start a connection to my house</text>
+
+  <!-- top: web -->
+  <text x="20" y="45" class="title accent">A website: the visitor pulls</text>
+  <rect x="20" y="60" width="150" height="56" class="box"/>
+  <text x="35" y="83">Browser</text>
+  <text x="35" y="101" class="muted">starts the connection</text>
+  <rect x="270" y="60" width="200" height="56" class="box"/>
+  <text x="285" y="83">Cloudflare edge</text>
+  <text x="285" y="101" class="muted">public IP, answers on 443</text>
+  <rect x="690" y="60" width="250" height="56" class="box"/>
+  <text x="705" y="83">srv1: cloudflared → Caddy</text>
+  <text x="705" y="101" class="muted">collects requests down the tunnel</text>
+  <path d="M170 88 H270" class="edge http" marker-end="url(#a)"/>
+  <text x="185" y="80" class="muted accent">HTTPS GET</text>
+  <!-- tunnel from srv1 outward -->
+  <path d="M690 100 C 600 100, 560 100, 470 100" class="edge http" marker-end="url(#a)"/>
+  <text x="500" y="135" class="muted accent">tunnel opened from the inside, outward</text>
+  <path d="M470 76 C 560 76, 600 76, 690 76" class="edge http" marker-end="url(#a)"/>
+  <text x="500" y="150" class="muted">the request rides back down the open tunnel</text>
+  <rect x="740" y="20" width="120" height="22" class="pill"/>
+  <text x="757" y="36" class="good">this works</text>
+
+  <!-- bottom: mail -->
+  <text x="20" y="215" class="title bad">Mail: the sender pushes</text>
+  <rect x="20" y="230" width="150" height="56" class="box"/>
+  <text x="35" y="253">Gmail's server</text>
+  <text x="35" y="271" class="muted">starts the connection</text>
+  <rect x="270" y="230" width="200" height="56" class="box"/>
+  <text x="285" y="253">DNS lookup</text>
+  <text x="285" y="271" class="mono">MX 22112002.xyz → ?</text>
+  <rect x="690" y="230" width="250" height="56" class="box"/>
+  <text x="705" y="253">srv1: a mail server</text>
+  <text x="705" y="271" class="muted">listening on 25, unreachable</text>
+  <path d="M170 258 H270" class="edge" marker-end="url(#a)"/>
+  <path d="M470 258 H596" class="edge bad"/>
+  <text x="480" y="250" class="muted bad">TCP to port 25</text>
+  <text x="300" y="310" class="muted">There is no Cloudflare in this path. The MX record must name a machine that</text>
+  <text x="300" y="328" class="muted">accepts the connection itself. I have no address to put there.</text>
+  <rect x="740" y="190" width="150" height="22" class="pill"/>
+  <text x="757" y="206" class="bad">this cannot work</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The tunnel works for the web because the public connects to Cloudflare, not to me. Mail servers want to connect to <em>me</em>.</figcaption>
+</figure>
+</section>
+
+<section id="what-the-tunnel-is">
+<h2><span class="num">3.</span> What Cloudflare Tunnel actually is</h2>
+<p>I had been treating the tunnel as "a pipe from the internet to my VM". It is narrower than that. A tunnel's public hostnames accept <strong>HTTP and HTTPS</strong>. Cloudflare's edge terminates the visitor's TLS, reads the HTTP request, and forwards <em>that request</em> down the tunnel. It is an HTTP reverse proxy with a very long cable. The ingress rules in <code>config.yml</code> even say so: every service line is <code>http://localhost:something</code>.</p>
+<p>Cloudflare does have ways to carry other TCP protocols, and I checked each one:</p>
+<ul>
+  <li><strong>Arbitrary TCP through a tunnel</strong> exists, but only for clients that run Cloudflare's own software (<code>cloudflared access</code> or the WARP client) to reach it. That is for <em>me</em> SSHing into a box. Gmail's mail server is not going to install WARP to talk to mine.</li>
+  <li><strong>Cloudflare Spectrum</strong> is the product that proxies raw TCP for the public, including SMTP. It is on the Enterprise plan. Not a homelab price.</li>
+  <li><strong>Cloudflare Email Routing</strong> is free and does receive mail for your domain on Cloudflare's own servers. But it only <em>forwards</em> to an existing mailbox elsewhere, such as Gmail. There is no inbox, no IMAP, nothing I would call "my mail server". It solves a different problem.</li>
+</ul>
+<p>The honest summary: the tunnel is an HTTP tool, and mail is not HTTP.</p>
+</section>
+
+<section id="other-tunnels">
+<h2><span class="num">4.</span> The other tunnels I looked at, and why they fail too</h2>
+<p>Once I understood the shape of the problem, I went looking for any service that would accept port 25 for me and hand the connection down to my house. The list is short and every entry has the same flaw.</p>
+<table>
+<thead><tr><th>Option</th><th>Carries SMTP?</th><th>Why it still doesn't work for mail</th></tr></thead>
+<tbody>
+<tr><td>Tailscale Funnel</td><td>No</td><td>Funnel publishes HTTPS (and a few TCP ports, but 443-style) to the public. Port 25 is not on the menu, and the public IP would be Tailscale's.</td></tr>
+<tr><td>ngrok / similar TCP tunnels</td><td>Technically yes, on a paid plan</td><td>The IP that connects to Gmail belongs to ngrok, is shared with strangers, and I cannot set its reverse DNS. Mail from it would be treated as spam before the first byte of the message.</td></tr>
+<tr><td>Cloudflare Spectrum</td><td>Yes</td><td>Enterprise plan only.</td></tr>
+<tr><td>ISP port forwarding</td><td>Would, if I had an IP</td><td>Behind CGNAT there is no IP to forward on. This is the whole premise of the Homelab series.</td></tr>
+</tbody>
+</table>
+<p>Every working answer has the same ingredient: <strong>a machine with a real public IP that I control</strong>, sitting in front of the connection. That is the same conclusion I reached about Tailscale versus self-hosted WireGuard in the Homelab series: without a public address, something public has to be the rendezvous point. The difference is that for private access Tailscale gives me that rendezvous for free, and for SMTP nobody does.</p>
+</section>
+
+<section id="sending">
+<h2><span class="num">5.</span> Receiving is only half of it: sending is worse</h2>
+<p>Suppose I ignored all of the above and only wanted to <em>send</em> mail from home. Outbound connections work fine under CGNAT, so the TCP part would succeed. The mail would still fail, for reasons that have nothing to do with my network and everything to do with how the receiving world judges a sender.</p>
+<ol>
+  <li><strong>The IP has no reverse DNS I control.</strong> Receiving servers look up the PTR record for the connecting IP and expect it to name a mail host that resolves back to that same IP. My ISP's shared address has whatever PTR the ISP gave it, if any. I cannot change it.</li>
+  <li><strong>Residential ranges are listed as "should not send mail".</strong> The Spamhaus Policy Block List catalogues IP ranges that ISPs have declared are for end users, not mail servers. Most big receivers consult it. A connection from such a range is refused or junked regardless of content.</li>
+  <li><strong>The IP is shared with strangers.</strong> Under CGNAT many households share my outbound address. If one of them has an infected laptop sending spam, the address's reputation is theirs, not mine.</li>
+  <li><strong>SPF cannot name my address</strong> because it changes, and because it is not mine to name.</li>
+</ol>
+<p>So the machine with the public IP is not only needed to <em>receive</em>. Outbound mail has to leave from it too, so that the IP Gmail sees has a PTR record I set, is not on a residential list, and carries only my reputation. Part 03 goes through each of those checks properly.</p>
+</section>
+
+<section id="decision">
+<h2><span class="num">6.</span> The decision this forced</h2>
+<p>Three honest options came out of this, and I wrote them down before picking:</p>
+<div class="callout road"><div class="label">Road not taken · no real mail server</div>
+<p>Cloudflare Email Routing forwards inbound to Gmail; a transactional relay like Brevo or Resend sends outbound for my apps. Costs nothing, runs nowhere. But there is no mailbox, no IMAP, no Roundcube, and nothing to learn. I would be renting the interesting part.</p></div>
+<div class="callout road"><div class="label">Road not taken · put the whole mail server on a VPS</div>
+<p>Rent a VPS, install everything there, read it from home. Fewest moving parts and the easiest deliverability. But then the mailboxes, the one piece of data I actually care about, live off-site on the cheapest box I could find, and <code>srv1</code> and its spare RAM sit idle. It also stops being a homelab project.</p></div>
+<div class="callout tip"><div class="label">Chosen · a thin front door, with the mail server at home</div>
+<p>Rent the smallest VPS that allows port 25 and lets me set PTR. Run nothing on it but a TCP forwarder for inbound and a minimal relay for outbound, both talking to <code>srv1</code> over Tailscale. The mail server, the mailboxes, the spam filter and the webmail all stay on <code>srv1</code>. The VPS owns the public IP and the reputation; my house owns the data.</p></div>
+<p>It is the first part of the homelab that costs money, roughly the price of a coffee a month, and I am treating that the same way I treated Tailscale's coordination server: a public rendezvous point is a thing that structurally cannot be self-hosted from behind CGNAT, so renting exactly that and nothing more is the honest minimum.</p>
+<p>The rest of the series is the theory I needed to do this properly (02 and 03), the tools (04, 05, 06), and then the build (07, 08).</p>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Pulled vs pushed protocol</dt><dd>My shorthand for who opens the connection. The web is pulled: the visitor connects to the server. Mail delivery is pushed: the sending server connects to the receiving one.</dd>
+<dt>Port 25</dt><dd>The TCP port every mail server in the world uses to hand messages to another mail server. If nobody answers there, the domain cannot receive mail.</dd>
+<dt>MX record</dt><dd>The DNS record that names which host accepts mail for a domain. It must point at a hostname with an A or AAAA record, never at a Cloudflare proxied address.</dd>
+<dt>PTR record</dt><dd>Reverse DNS: the name an IP address claims to have. Only whoever controls the IP block can set it, which is why it has to be the VPS provider's IP and not my ISP's.</dd>
+<dt>Spamhaus PBL</dt><dd>A public list of IP ranges whose owners have said "end-user devices live here, do not accept mail directly from them". Residential and mobile ranges are on it by design.</dd>
+<dt>Cloudflare Spectrum</dt><dd>Cloudflare's raw-TCP proxy product. It would solve this problem and is priced for enterprises.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="index.html">← Series index</a>
+  <a href="02-how-email-works.html">02 · How email actually works →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
