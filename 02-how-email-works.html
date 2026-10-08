@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 · How Email Actually Works</title>
+<meta name="description" content="The life of one message, from the Send button to the inbox on the other side: roles, ports, the SMTP conversation, queues, and reading it back over IMAP or JMAP.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a class="active" href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 02 · The theory</div>
+  <h1>How Email Actually Works</h1>
+  <p class="lead">I have sent email every day for most of my life and, until this project, could not have told you what happens between pressing Send and the message appearing somewhere else. This part follows one message the whole way, because every configuration decision later is a decision about one of these steps.</p>
+  <div class="meta">Reading time about 15 minutes. Still no commands, but there is a real SMTP transcript to read.</div>
+</header>
+
+<section id="roles">
+<h2><span class="num">1.</span> Four jobs, not one program</h2>
+<p>The first thing that confused me is that "a mail server" is not one thing. The protocols were designed in the early 1980s by people who assumed each job might run on a different machine, so the specifications name four roles. Modern software bundles them, but the names still show up in every log line and error message, so they are worth learning once.</p>
+<table>
+<thead><tr><th>Role</th><th>Stands for</th><th>What it does</th><th>In my build</th></tr></thead>
+<tbody>
+<tr><td><strong>MUA</strong></td><td>Mail User Agent</td><td>The program a person uses. Composes, displays, files messages.</td><td>Thunderbird, the phone's mail app, Roundcube</td></tr>
+<tr><td><strong>MSA</strong></td><td>Mail Submission Agent</td><td>Accepts a new message from an authenticated user and hands it to the MTA. Checks the user is allowed to send as that address.</td><td>Stalwart, on ports 465 and 587</td></tr>
+<tr><td><strong>MTA</strong></td><td>Mail Transfer Agent</td><td>Moves messages between servers. Looks up where the recipient's domain lives, connects there on port 25, and keeps retrying if it cannot.</td><td>Stalwart at home, plus the Postfix relay on the VPS for the last hop out</td></tr>
+<tr><td><strong>MDA</strong></td><td>Mail Delivery Agent</td><td>Takes a message that has arrived for a local user and files it into their mailbox. This is where filters (Sieve) run.</td><td>Stalwart</td></tr>
+</tbody>
+</table>
+<p>The reason I care about the split is that <strong>the MSA and the MTA treat connections completely differently</strong>, even when they are the same program. An MSA talks to <em>my users</em>: it demands a password, it is reached on 465 or 587, and it is allowed to send mail <em>from</em> my domain. An MTA talks to <em>strangers</em>: it accepts mail on port 25 from any server in the world, without a password, but only mail <em>to</em> my domain. A server that accepts mail from strangers to anywhere is an "open relay", which is the single fastest way to get a new IP blacklisted. Keeping these two doors separate is the first principle of the whole setup.</p>
+</section>
+
+<section id="journey">
+<h2><span class="num">2.</span> The journey of one message</h2>
+<p>Say I am in Roundcube on <code>webmail.22112002.xyz</code> and I write to a friend at Gmail. Here is everything that happens, in order.</p>
+<ol>
+  <li><strong>Submission.</strong> Roundcube (the MUA) connects to Stalwart (acting as MSA), authenticates as me, and hands over the message. Stalwart checks the <code>From:</code> address belongs to my account, stamps the message with a DKIM signature (Part 03), and puts it in its outbound queue.</li>
+  <li><strong>Lookup.</strong> Stalwart (now the MTA) asks DNS: <em>who receives mail for <code>gmail.com</code>?</em> The answer is a list of MX records, each a hostname with a priority number. It picks the lowest number first and resolves that hostname to an IP.</li>
+  <li><strong>Transfer.</strong> It opens a TCP connection to that IP on port 25 and has the SMTP conversation in the next section. In my build this step is split: Stalwart hands the message over Tailscale to the relay on the VPS, and the relay does the port-25 connection to Gmail, so the IP Gmail sees is the VPS's. Part 05 covers why.</li>
+  <li><strong>Acceptance or deferral.</strong> Gmail's MTA either says "250, queued" and the message is now its responsibility, or it refuses. If it refuses with a temporary code, my side keeps the message and tries again later. If it refuses permanently, my side generates a bounce back to me.</li>
+  <li><strong>Delivery.</strong> Inside Google, an MDA runs its spam checks and files the message into my friend's mailbox.</li>
+  <li><strong>Retrieval.</strong> My friend's phone connects over IMAP (or Google's own API) and pulls the message down to display it.</li>
+</ol>
+
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="The path of one message: a mail client submits to the MSA on port 465, which queues it in the MTA; the MTA asks DNS for the MX record of the recipient domain, connects to the remote MTA on port 25, which hands the message to an MDA that files it into a mailbox; a remote mail client reads it over IMAP on 993.">
+  <rect x="20" y="60" width="430" height="150" class="box2"/>
+  <text x="35" y="83" class="title">My side: 22112002.xyz</text>
+  <rect x="510" y="60" width="430" height="150" class="box2"/>
+  <text x="525" y="83" class="title">Their side: gmail.com</text>
+
+  <rect x="35" y="110" width="110" height="60" class="box"/>
+  <text x="48" y="133">MUA</text>
+  <text x="48" y="151" class="muted">Roundcube</text>
+  <rect x="185" y="110" width="110" height="60" class="box"/>
+  <text x="198" y="133">MSA</text>
+  <text x="198" y="151" class="muted">auth, DKIM</text>
+  <rect x="325" y="110" width="110" height="60" class="box"/>
+  <text x="338" y="133">MTA</text>
+  <text x="338" y="151" class="muted">queue, retry</text>
+
+  <rect x="525" y="110" width="110" height="60" class="box"/>
+  <text x="538" y="133">MTA</text>
+  <text x="538" y="151" class="muted">port 25</text>
+  <rect x="665" y="110" width="110" height="60" class="box"/>
+  <text x="678" y="133">MDA</text>
+  <text x="678" y="151" class="muted">spam check, file</text>
+  <rect x="805" y="110" width="120" height="60" class="box"/>
+  <text x="818" y="133">Mailbox → MUA</text>
+  <text x="818" y="151" class="muted">their phone</text>
+
+  <path d="M145 140 H185" class="edge ok" marker-end="url(#a)"/>
+  <text x="147" y="188" class="mono">:465 + password</text>
+  <path d="M295 140 H325" class="edge ok" marker-end="url(#a)"/>
+  <path d="M435 140 H525" class="edge ok" marker-end="url(#a)"/>
+  <text x="447" y="130" class="mono">SMTP :25</text>
+  <text x="440" y="188" class="muted">no password, any server</text>
+  <path d="M635 140 H665" class="edge ok" marker-end="url(#a)"/>
+  <path d="M775 140 H805" class="edge ok" marker-end="url(#a)"/>
+  <text x="790" y="188" class="mono">IMAP :993</text>
+
+  <rect x="380" y="235" width="200" height="44" class="box"/>
+  <text x="395" y="254">DNS</text>
+  <text x="395" y="270" class="mono">MX gmail.com → ?</text>
+  <path d="M380 257 H370 V170" class="edge" marker-end="url(#a)"/>
+  <text x="300" y="240" class="muted">1. who takes</text>
+  <text x="300" y="256" class="muted">mail for them?</text>
+  <path d="M580 257 H590 V170" class="edge"/>
+  <text x="600" y="240" class="muted">2. that host's</text>
+  <text x="600" y="256" class="muted">IP, port 25</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Only one hop in this picture crosses the open internet: MTA to MTA on port 25. Everything else is either inside my network or inside theirs. That one hop is what Part 01 was about.</figcaption>
+</figure>
+</section>
+
+<section id="submission">
+<h2><span class="num">3.</span> Submission: 587 and 465, and why there are two</h2>
+<p>Historically everything, including clients sending new mail, went through port 25. Spam made that untenable, because an ISP could not tell a customer's laptop sending one message from a compromised laptop sending ten thousand. So a separate <strong>submission</strong> port was defined, where authentication is mandatory, and ISPs started blocking outbound 25 from residential connections entirely. That is why your phone's mail settings never say 25.</p>
+<ul>
+  <li><strong>Port 587 with STARTTLS.</strong> The connection begins in plain text, the client says <code>EHLO</code>, the server advertises <code>STARTTLS</code>, and they upgrade to encryption before any password is sent. This was the standard for years. Its weakness is that an attacker in the middle can strip the <code>STARTTLS</code> advertisement and the client might carry on in the clear.</li>
+  <li><strong>Port 465 with implicit TLS.</strong> The connection is TLS from the first byte, exactly like HTTPS. There is nothing to strip. This port was briefly deprecated and then brought back as the recommended one, so older guides argue about it. I am treating 465 as primary and offering 587 as well for clients that insist.</li>
+</ul>
+<p>Both are MSA doors: no password, no entry. Stalwart runs one listener per port and the only difference in config is a single "implicit TLS" switch.</p>
+</section>
+
+<section id="mx">
+<h2><span class="num">4.</span> The lookup: MX records and priorities</h2>
+<p>Before an MTA can connect anywhere it needs to turn <code>gmail.com</code> into an IP that accepts mail. It does not use the domain's A record for that. It asks for <strong>MX records</strong>, which exist precisely so that the web server and the mail server for a domain can be different machines.</p>
+<pre><code>$ dig +short MX gmail.com
+5 gmail-smtp-in.l.google.com.
+10 alt1.gmail-smtp-in.l.google.com.
+20 alt2.gmail-smtp-in.l.google.com.
+30 alt3.gmail-smtp-in.l.google.com.
+40 alt4.gmail-smtp-in.l.google.com.</code></pre>
+<p>Each line is a priority and a hostname. Lower number wins; the others are fallbacks tried in order if the first does not answer. Each hostname then has an ordinary A or AAAA record giving the IP. For my domain there will be exactly one line, <code>10 mail.22112002.xyz.</code>, and <code>mail.22112002.xyz</code> will have an A record pointing at the VPS.</p>
+<p>Two rules I learned the hard way while reading about this:</p>
+<ul>
+  <li>If a domain has <em>no</em> MX record at all, senders fall back to its A record and try port 25 there. That is a trap for a domain whose A record is Cloudflare's proxy: mail silently goes to an IP that does not speak SMTP. Always publish an MX.</li>
+  <li>The MX target must be a <em>hostname</em>, not an IP, and that hostname must not be a CNAME. Part 03 adds the Cloudflare-specific rule: the target's A record must be grey-cloud, DNS only.</li>
+</ul>
+</section>
+
+<section id="smtp">
+<h2><span class="num">5.</span> The SMTP conversation, line by line</h2>
+<p>SMTP is a text protocol. You can type it by hand, and in Part 09 I do, because it is the fastest way to see exactly where a delivery fails. Here is a complete, slightly trimmed transaction from a client to a server. Lines starting with <code>C:</code> are sent by the connecting side, <code>S:</code> by the receiving side.</p>
+<pre><code>S: 220 mail.22112002.xyz ESMTP Stalwart              ← greeting; 220 means "ready"
+C: EHLO sender.example.org                            ← "hello, this is who I claim to be"
+S: 250-mail.22112002.xyz
+S: 250-STARTTLS                                       ← the server lists what it supports
+S: 250-SIZE 52428800
+S: 250 PIPELINING
+C: STARTTLS
+S: 220 Go ahead                                       ← from here on the channel is encrypted
+C: EHLO sender.example.org                            ← must say hello again after TLS
+S: 250 ...
+C: MAIL FROM:&lt;alice@example.org&gt;                       ← the ENVELOPE sender (return path)
+S: 250 OK
+C: RCPT TO:&lt;me@22112002.xyz&gt;                           ← the ENVELOPE recipient
+S: 250 OK                                             ← "I accept mail for that address"
+C: DATA
+S: 354 Start mail input; end with &lt;CRLF&gt;.&lt;CRLF&gt;
+C: From: Alice &lt;alice@example.org&gt;                    ← the HEADERS begin; this From: is just text
+C: To: me@22112002.xyz
+C: Subject: hello
+C: Date: Wed, 08 Oct 2026 10:12:00 +0200
+C:
+C: Hi, testing.
+C: .                                                  ← a line with only a dot ends the message
+S: 250 2.0.0 Message queued as 1a2b3c                 ← the server now owns the message
+C: QUIT
+S: 221 Bye</code></pre>
+<p>Three things in there changed how I think about mail.</p>
+<p><strong>The reply codes are the protocol.</strong> Every server line starts with three digits and the first digit is the only thing that matters to a machine:</p>
+<table>
+<thead><tr><th>First digit</th><th>Meaning</th><th>What the sender does</th></tr></thead>
+<tbody>
+<tr><td><strong>2xx</strong></td><td>Success</td><td>Moves on to the next step. <code>250</code> after <code>DATA</code> is the moment responsibility transfers.</td></tr>
+<tr><td><strong>3xx</strong></td><td>Keep going, I need more</td><td>Only <code>354</code> in practice: "send me the message body now".</td></tr>
+<tr><td><strong>4xx</strong></td><td>Temporary failure</td><td>Keeps the message in its queue and retries later, typically for up to a few days, with growing gaps. Greylisting (Part 04) deliberately answers <code>450</code> to first-time senders because real MTAs retry and most spam bots do not.</td></tr>
+<tr><td><strong>5xx</strong></td><td>Permanent failure</td><td>Gives up and sends a bounce to the envelope sender. <code>550 user unknown</code> and <code>554 rejected due to policy</code> are the ones I will meet.</td></tr>
+</tbody>
+</table>
+<p><strong>The envelope and the headers are different things.</strong> The address in <code>MAIL FROM</code> is the <em>envelope</em>: it is what the receiving server uses to send a bounce, and it is what SPF checks. The <code>From:</code> line inside <code>DATA</code> is a <em>header</em>: it is what the human sees in their mail client, and it is what DMARC checks. They are usually the same for a person writing a message, but they are routinely different for mailing lists, forwarders and newsletters, and the whole trick of email forgery is that <strong>nothing in SMTP itself stops me typing any <code>From:</code> I like</strong>. Part 03 is about the DNS records that were bolted on later to close that gap.</p>
+<p><strong>Nothing is authenticated on port 25.</strong> There was no password anywhere in that transcript. The receiving server accepted a message from a stranger purely because <code>RCPT TO</code> named a mailbox it hosts. That is correct behaviour for an MTA, and it is why everything that makes mail trustworthy lives in DNS rather than in SMTP.</p>
+
+<figure>
+<svg viewBox="0 0 960 420" role="img" aria-label="An SMTP exchange laid out as two columns. The client column sends EHLO, STARTTLS, MAIL FROM, RCPT TO, DATA, the message body and QUIT. The server column replies with 220, 250, 220, 250, 250, 354, 250 queued, 221. Codes starting with 2 are green, 3 is amber. A side note shows that a 4xx reply would mean retry later and a 5xx would mean bounce.">
+  <rect x="20" y="20" width="400" height="380" class="box2"/>
+  <text x="35" y="45" class="title">Client (the sending MTA)</text>
+  <rect x="540" y="20" width="400" height="380" class="box2"/>
+  <text x="555" y="45" class="title">Server (my MTA on port 25)</text>
+
+  <!-- rows -->
+  <rect x="555" y="60" width="370" height="26" class="box"/><text x="565" y="78" class="mono"><tspan class="good">220</tspan> mail.22112002.xyz ESMTP</text>
+  <path d="M555 73 H420" class="edge ok" marker-end="url(#a)"/>
+
+  <rect x="35" y="96" width="370" height="26" class="box"/><text x="45" y="114" class="mono">EHLO sender.example.org</text>
+  <path d="M405 109 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="132" width="370" height="26" class="box"/><text x="565" y="150" class="mono"><tspan class="good">250</tspan>-STARTTLS  250-SIZE  250 OK</text>
+  <path d="M555 145 H420" class="edge ok" marker-end="url(#a)"/>
+
+  <rect x="35" y="168" width="370" height="26" class="box"/><text x="45" y="186" class="mono">STARTTLS</text>
+  <path d="M405 181 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="204" width="370" height="26" class="box"/><text x="565" y="222" class="mono"><tspan class="good">220</tspan> Go ahead   → TLS from here</text>
+  <path d="M555 217 H420" class="edge ok" marker-end="url(#a)"/>
+
+  <rect x="35" y="240" width="370" height="26" class="box"/><text x="45" y="258" class="mono">MAIL FROM:&lt;alice@example.org&gt;</text>
+  <path d="M405 253 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="240" width="370" height="26" class="box"/><text x="565" y="258" class="mono"><tspan class="good">250</tspan> OK</text>
+
+  <rect x="35" y="276" width="370" height="26" class="box"/><text x="45" y="294" class="mono">RCPT TO:&lt;me@22112002.xyz&gt;</text>
+  <path d="M405 289 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="276" width="370" height="26" class="box"/><text x="565" y="294" class="mono"><tspan class="good">250</tspan> OK   (or <tspan class="bad">550</tspan> user unknown)</text>
+
+  <rect x="35" y="312" width="370" height="26" class="box"/><text x="45" y="330" class="mono">DATA … headers, body, lone "."</text>
+  <path d="M405 325 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="312" width="370" height="26" class="box"/><text x="565" y="330" class="mono"><tspan class="warnc">354</tspan> go  →  <tspan class="good">250</tspan> queued as 1a2b3c</text>
+
+  <rect x="35" y="348" width="370" height="26" class="box"/><text x="45" y="366" class="mono">QUIT</text>
+  <path d="M405 361 H540" class="edge" marker-end="url(#a)"/>
+  <rect x="555" y="348" width="370" height="26" class="box"/><text x="565" y="366" class="mono"><tspan class="good">221</tspan> Bye</text>
+
+  <text x="35" y="392" class="muted"><tspan class="good">2xx</tspan> carry on · <tspan class="warnc">3xx</tspan> send more · <tspan class="warnc">4xx</tspan> keep it, retry later · <tspan class="bad">5xx</tspan> give up, bounce</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Every reply the server gives starts with a code, and the first digit tells the client whether to continue, wait, or give up. The <code>250</code> after the message body is the handover.</figcaption>
+</figure>
+</section>
+
+<section id="queue">
+<h2><span class="num">6.</span> The queue: why email is slow on purpose</h2>
+<p>Because a <code>4xx</code> reply means "try later", every MTA has a <strong>queue</strong>: a folder of messages it has accepted but not yet delivered, with a next-attempt time on each. If Gmail is briefly unreachable, or greylists me, or my VPS is rebooting, nothing is lost; the message waits and goes out on the next attempt. The retry gaps grow (a few minutes, then half an hour, then hours) and after a configurable deadline, usually a few days, the MTA gives up and bounces.</p>
+<p>In my build there are <em>two</em> queues on the outbound path: Stalwart's at home and Postfix's on the VPS. That is fine, and it is actually useful. If the Tailscale link is down, Stalwart holds the mail. If Gmail is down, Postfix holds it. Each queue is visible (Stalwart in its web admin, Postfix with <code>mailq</code>), and Part 09 uses them as evidence of where a delivery is stuck.</p>
+<div class="callout tip"><div class="label">The mental model</div>
+<p>Email is store-and-forward, not a phone call. "Sent" means "my server accepted it", not "it arrived". Nothing between my Send button and their inbox is required to be online at the same moment, which is what made the protocol survive forty years of flaky networks, and what makes debugging it a matter of finding which queue the message is sitting in.</p></div>
+</section>
+
+<section id="storage">
+<h2><span class="num">7.</span> Delivery and storage</h2>
+<p>Once my MTA has said <code>250 queued</code> for an inbound message, the MDA takes over. It runs the spam filter, applies the user's Sieve rules (for example "anything from the LMS goes to a folder"), and writes the message into a mailbox. Traditionally that mailbox was a directory of files on disk, one message per file, in a layout called Maildir. Stalwart does not use Maildir. It keeps messages in its own database (RocksDB in my case), with the message body stored as a blob and the metadata (flags, folders, threads, full-text index) in indexed tables. The practical consequence is that there is no folder of <code>.eml</code> files to poke at, and backup means backing up <code>/var/lib/stalwart</code> rather than a mail directory. Part 04 goes into this.</p>
+</section>
+
+<section id="reading">
+<h2><span class="num">8.</span> Reading it back: IMAP, JMAP and POP3</h2>
+<p>Delivery puts a message in a mailbox on the server. A separate protocol gets it from there to a screen.</p>
+<p><strong>IMAP</strong> (ports 143 with STARTTLS, 993 implicit TLS) is the one every mail client speaks. The mailbox stays on the server; the client synchronises a view of it, so the same folders and read/unread flags appear on the laptop and the phone. It is a chatty protocol designed in the dial-up era, with many round trips per action, which is why mail apps on a slow connection feel sluggish, and why the whole-inbox-resync problem exists.</p>
+<p><strong>JMAP</strong> is the modern replacement: the same mailbox-on-the-server idea, but as a JSON API over HTTPS, batching many operations into one request and pushing changes to the client. Few desktop clients speak it yet, but Stalwart implements it natively and it is the protocol its own account web UI uses. For me this is one of the arguments for Stalwart over the traditional stack: I get the old protocol for Thunderbird and the new one for free.</p>
+<p><strong>POP3</strong> (110/995) downloads messages and, by default, deletes them from the server. It is what people used before always-on connections; I am leaving it switched off.</p>
+</section>
+
+<section id="ports">
+<h2><span class="num">9.</span> Every port in one table</h2>
+<table>
+<thead><tr><th>Port</th><th>Protocol</th><th>Who connects</th><th>Encryption</th><th>In this build</th></tr></thead>
+<tbody>
+<tr><td><code>25</code></td><td>SMTP, server to server</td><td>Other MTAs, unauthenticated</td><td>Opportunistic STARTTLS</td><td>Public on the VPS, forwarded to Stalwart</td></tr>
+<tr><td><code>465</code></td><td>SMTP submission</td><td>My clients, password required</td><td>Implicit TLS</td><td>Public on the VPS, forwarded to Stalwart</td></tr>
+<tr><td><code>587</code></td><td>SMTP submission</td><td>My clients, password required</td><td>STARTTLS</td><td>Loopback only, for Roundcube</td></tr>
+<tr><td><code>143</code></td><td>IMAP</td><td>My clients</td><td>STARTTLS</td><td>Loopback only, for Roundcube</td></tr>
+<tr><td><code>993</code></td><td>IMAP</td><td>My clients</td><td>Implicit TLS</td><td>Public on the VPS, forwarded to Stalwart</td></tr>
+<tr><td><code>110</code> / <code>995</code></td><td>POP3</td><td>Legacy clients</td><td>STARTTLS / implicit</td><td>Off</td></tr>
+<tr><td><code>4190</code></td><td>ManageSieve</td><td>Clients editing server-side filter rules</td><td>STARTTLS</td><td>Off for now; Stalwart's web UI edits Sieve scripts</td></tr>
+<tr><td><code>443</code></td><td>HTTPS: JMAP, web admin, MTA-STS policy, autoconfig</td><td>Browsers, JMAP clients, other MTAs fetching policy</td><td>TLS</td><td>Admin over Tailscale only; policy files published through the Cloudflare Tunnel</td></tr>
+</tbody>
+</table>
+<p>"Public on the VPS" means HAProxy listens there and forwards the raw TCP stream over Tailscale to Stalwart, which terminates TLS itself with a real Let's Encrypt certificate for <code>mail.22112002.xyz</code>. The VPS never holds a private key. That design is Part 05.</p>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>MUA / MSA / MTA / MDA</dt><dd>The four roles: the user's client, the door that accepts new mail from authenticated users, the engine that moves mail between servers, and the piece that files arriving mail into mailboxes.</dd>
+<dt>Submission</dt><dd>A client handing a new message to its own server, on 465 or 587, with a password. Distinct from transfer on port 25, which has no password.</dd>
+<dt>Open relay</dt><dd>A server that forwards mail from strangers to anywhere. Spammers hunt for them; getting listed as one ends a new IP's usefulness in hours.</dd>
+<dt>MX record</dt><dd>DNS record naming the host(s) that accept mail for a domain, each with a priority. Lower is tried first.</dd>
+<dt>Envelope vs header</dt><dd>The envelope is <code>MAIL FROM</code> / <code>RCPT TO</code>, used for routing and bounces. The headers are the <code>From:</code> / <code>To:</code> lines inside the message, shown to humans. They can differ, and forgery lives in that gap.</dd>
+<dt>Reply code</dt><dd>The three digits that start every SMTP server response. 2 = success, 3 = send more, 4 = temporary failure (retry), 5 = permanent failure (bounce).</dd>
+<dt>Queue</dt><dd>Accepted-but-undelivered messages with their next retry time. Every MTA has one; finding which queue a message is in is most of debugging.</dd>
+<dt>Greylisting</dt><dd>Answering a first-time sender with a temporary <code>4xx</code> on purpose. Real servers retry; most spam bots do not.</dd>
+<dt>IMAP / JMAP / POP3</dt><dd>Protocols for a client to read a mailbox. IMAP is universal, JMAP is its JSON-over-HTTPS successor that Stalwart speaks natively, POP3 downloads-and-deletes.</dd>
+<dt>Sieve</dt><dd>A small filtering language run by the MDA at delivery time: file, flag, forward, discard. ManageSieve is the protocol for editing those rules remotely.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="01-the-problem.html">← 01 · Why a tunnel can't carry mail</a>
+  <a href="03-dns-and-trust.html">03 · DNS and trust →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
