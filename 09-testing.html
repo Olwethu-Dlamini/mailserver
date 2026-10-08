@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>09 · Testing and Troubleshooting, One Layer at a Time</title>
-<meta name="description" content="A debugging ladder for the mail server: DNS, listeners, reachability, TLS, SMTP, then logs. One command per rung, cheapest fact first.">
+<title>09 · Testing and Troubleshooting, One Hop at a Time</title>
+<meta name="description" content="The debugging ladder for a mail server whose inbound path runs through Cloudflare and a Worker and whose outbound path runs through Resend: one command per hop, cheapest fact first, with the faults actually met on build day.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,276 +20,196 @@
 
 <main>
 <header class="hero">
-  <div class="kicker">Part 09 · Testing</div>
-  <h1>Testing and Troubleshooting, One Layer at a Time</h1>
-  <p class="lead">Every fault in this system lives on one of six layers, and each layer has one command that answers "is it this one?" in under a second. This page is those commands, in the order that finds the fault fastest.</p>
-  <div class="meta">Keep this page open during the build. It is the one I will reach for most.</div>
+  <div class="kicker">Part 09 · Keeping it working</div>
+  <h1>Testing and Troubleshooting, One Hop at a Time</h1>
+  <p class="lead">A message to me now crosses Gmail, Cloudflare's MX, a Worker, my tunnel and Stalwart. A message from me crosses Roundcube, Stalwart, Resend and the recipient's MX. Each hop has exactly one place that tells the truth about it. This page is the list, in the order that finds the fault fastest.</p>
+  <div class="meta">Rewritten after the build on 8 October 2026. The faults table is what actually happened, not what I guessed might.</div>
 </header>
 
 <section id="method">
 <h2><span class="num">0.</span> The method</h2>
-<p>The Caddy debugging story in the Homelab series taught me one thing I keep relearning: when something is broken, the temptation is to change a setting and see if it helps. That produces a hope. A targeted command produces a fact, and a fact eliminates a whole layer at once. So the rule here is <strong>cheapest fact first</strong>: DNS before listeners, listeners before reachability, reachability before TLS, TLS before SMTP, and logs last, because logs are where you go once you know <em>which</em> log to read.</p>
-<p>Mail has more layers than a website, and the hops are spread over two machines, so the ladder is longer. But each rung is still one command.</p>
+<p>The Caddy debugging story in the Homelab series taught me one thing I keep relearning: when something is broken, the temptation is to change a setting and see if it helps. That produces a hope. A targeted command produces a fact, and facts stack. Mail has more hops than a website and three of them belong to other people, so the ladder is longer and two rungs are read in someone else's dashboard rather than my own shell. But each rung is still one look.</p>
 
 <figure>
-<svg viewBox="0 0 960 300" role="img" aria-label="A six-rung ladder from left to right: DNS with dig, listening with ss, reachability with nc and tailscale ping, TLS with openssl s_client, SMTP with swaks, and logs with journalctl. An arrow labelled cheapest fact first runs along the top.">
+<svg viewBox="0 0 960 300" role="img" aria-label="A six-rung ladder from left to right: DNS, Cloudflare's Email Routing activity log, the Worker's log via wrangler tail, Stalwart's log on srv1, Resend's logs page, and the recipient's view via Gmail's Show original.">
   <path d="M30 40 H930" class="edge" marker-end="url(#a)"/>
-  <text x="30" y="30" class="muted">cheapest fact first</text>
-  <text x="760" y="30" class="muted">most detail, most time</text>
+  <text x="30" y="30" class="muted">cheapest fact first · inbound reads left to right</text>
+  <text x="700" y="30" class="muted">outbound reads from rung 4 onward</text>
 
   <rect x="20" y="70" width="140" height="150" class="box"/>
   <text x="35" y="95" class="title">1 · DNS</text>
-  <text x="35" y="118" class="muted">Do the names point</text>
-  <text x="35" y="134" class="muted">where I think?</text>
-  <text x="35" y="170" class="mono accent">dig MX / A / -x</text>
-  <text x="35" y="190" class="mono accent">dig TXT</text>
+  <text x="35" y="118" class="muted">Is the MX Cloudflare's?</text>
+  <text x="35" y="134" class="muted">Are the five TXTs there?</text>
+  <text x="35" y="170" class="mono accent">DoH query, or dig</text>
 
   <rect x="175" y="70" width="140" height="150" class="box"/>
-  <text x="190" y="95" class="title">2 · Listening</text>
-  <text x="190" y="118" class="muted">Is anything on</text>
-  <text x="190" y="134" class="muted">the port at all?</text>
-  <text x="190" y="170" class="mono accent">ss -tlnp</text>
+  <text x="190" y="95" class="title">2 · Routing</text>
+  <text x="190" y="118" class="muted">Did Cloudflare receive</text>
+  <text x="190" y="134" class="muted">it and call the Worker?</text>
+  <text x="190" y="170" class="mono accent">Email Routing ›</text>
+  <text x="190" y="190" class="mono accent">Activity log</text>
 
   <rect x="330" y="70" width="140" height="150" class="box"/>
-  <text x="345" y="95" class="title">3 · Reach</text>
-  <text x="345" y="118" class="muted">Can hop A open a</text>
-  <text x="345" y="134" class="muted">socket to hop B?</text>
-  <text x="345" y="170" class="mono accent">nc -vz</text>
-  <text x="345" y="190" class="mono accent">tailscale ping</text>
+  <text x="345" y="95" class="title">3 · Worker</text>
+  <text x="345" y="118" class="muted">Did the Worker reach</text>
+  <text x="345" y="134" class="muted">Stalwart and get 250?</text>
+  <text x="345" y="170" class="mono accent">wrangler tail</text>
 
   <rect x="485" y="70" width="140" height="150" class="box"/>
-  <text x="500" y="95" class="title">4 · TLS</text>
-  <text x="500" y="118" class="muted">Right certificate,</text>
-  <text x="500" y="134" class="muted">right name, right date?</text>
-  <text x="500" y="170" class="mono accent">openssl s_client</text>
+  <text x="500" y="95" class="title">4 · Stalwart</text>
+  <text x="500" y="118" class="muted">DKIM, DMARC, spam,</text>
+  <text x="500" y="134" class="muted">delivery, or the route?</text>
+  <text x="500" y="170" class="mono accent">/var/log/stalwart/</text>
 
   <rect x="640" y="70" width="140" height="150" class="box"/>
-  <text x="655" y="95" class="title">5 · SMTP</text>
-  <text x="655" y="118" class="muted">Does the server</text>
-  <text x="655" y="134" class="muted">say 250 or 5xx?</text>
-  <text x="655" y="170" class="mono accent">swaks</text>
+  <text x="655" y="95" class="title">5 · Resend</text>
+  <text x="655" y="118" class="muted">Did Resend accept and</text>
+  <text x="655" y="134" class="muted">deliver it onward?</text>
+  <text x="655" y="170" class="mono accent">resend.com › Logs</text>
 
   <rect x="795" y="70" width="145" height="150" class="box"/>
-  <text x="810" y="95" class="title">6 · Logs</text>
-  <text x="810" y="118" class="muted">Now I know which</text>
-  <text x="810" y="134" class="muted">log to read.</text>
-  <text x="810" y="170" class="mono accent">journalctl -u</text>
-  <text x="810" y="190" class="mono accent">tail -f</text>
+  <text x="810" y="95" class="title">6 · Recipient</text>
+  <text x="810" y="118" class="muted">What did Gmail decide,</text>
+  <text x="810" y="134" class="muted">and why?</text>
+  <text x="810" y="170" class="mono accent">Show original</text>
 
-  <text x="20" y="255" class="muted">Each rung either confirms the layer is fine, so move right, or finds the fault, so stop. Never skip to the logs first; there are five of them on two machines.</text>
+  <text x="20" y="255" class="muted">Each rung either confirms the hop is fine, so move right, or finds the fault, so stop. Rungs 2, 5 and 6 are other people's dashboards; rungs 1, 3 and 4 are mine.</text>
   <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
 </svg>
-<figcaption>The ladder. A fault on rung 1 makes every rung to the right fail too, which is why climbing from the left saves time.</figcaption>
+<figcaption>The ladder for the as-built design. A fault on rung 1 makes every rung to the right fail too, which is why climbing from the left saves time.</figcaption>
 </figure>
 </section>
 
 <section id="dns">
 <h2><span class="num">1.</span> Is it DNS?</h2>
-<p>Most "the mail server is broken" reports from new setups are DNS: a record that has not propagated, a proxied record, a typo in a selector. These are the lookups, with what I expect each to return.</p>
-<pre><code># Who accepts mail for the domain?
-dig MX 22112002.xyz +short
-# 10 mail.22112002.xyz.
+<p>The zone has two owners now besides me, so the first question is whether each of them still has what it needs. My laptop has no <code>dig</code>, so on build day I queried Cloudflare's resolver over HTTPS; <code>dig</code> works the same if it is installed.</p>
+<pre><code># one function, any record
+q(){ curl -s "https://cloudflare-dns.com/dns-query?name=$1&amp;type=$2" -H 'accept: application/dns-json' \
+  | python3 -c 'import sys,json; a=json.load(sys.stdin).get("Answer"); print(" | ".join(x["data"] for x in a) if a else "(none)")'; }
 
-# Where is that host?  (must be the VPS, never a Cloudflare 104.x / 172.x address)
-dig A mail.22112002.xyz +short
-# &lt;vps-public-ip&gt;
-
-# And does the IP claim the same name back?
-dig -x &lt;vps-public-ip&gt; +short
-# mail.22112002.xyz.
-
-# SPF, on the bare domain
-dig TXT 22112002.xyz +short
-# "v=spf1 mx -all"
-
-# DMARC
-dig TXT _dmarc.22112002.xyz +short
-# "v=DMARC1; p=none; rua=mailto:..."
-
-# DKIM: the selector names come from Stalwart's domain page (Part 07)
-dig TXT &lt;selector&gt;._domainkey.22112002.xyz +short
-# "v=DKIM1; k=rsa; p=MIIB..."   or   k=ed25519</code></pre>
-<p>Two refinements that have each saved me an hour:</p>
-<ul>
-  <li><strong>Ask a specific resolver.</strong> <code>dig @1.1.1.1 MX 22112002.xyz</code> asks Cloudflare's public resolver directly, bypassing the router and the ISP. If <code>@1.1.1.1</code> gives the right answer and the plain command does not, the record is correct and a cache somewhere between me and the internet is stale. Wait for the TTL to expire, or ignore it: the rest of the world is not using my router's cache.</li>
-  <li><strong>Read the TTL.</strong> Drop <code>+short</code> and the second column of the answer is the seconds left before a cache has to re-ask. A change I made ten minutes ago with a one-hour TTL is not broken, it is early.</li>
-</ul>
-<div class="callout warn"><div class="label">The Cloudflare-specific fault</div>
-<p>If <code>dig A mail.22112002.xyz</code> returns two addresses in <code>104.x.x.x</code> or <code>172.6x.x.x</code>, the record is proxied (orange cloud). Mail servers connecting to those addresses on port 25 get nothing, and the sender sees a connection timeout. Flip it to DNS only. This is the single most likely DNS mistake in this design, because every other record in the zone is <em>supposed</em> to be orange.</p></div>
+q 22112002.xyz MX                      # must be route1/2/3.mx.cloudflare.net, nothing else
+q 22112002.xyz TXT                     # must contain v=spf1 include:_spf.mx.cloudflare.net ~all
+q cf2024-1._domainkey.22112002.xyz TXT  # Cloudflare's DKIM key
+q resend._domainkey.22112002.xyz TXT    # Resend's DKIM key, p=MIGf…
+q rsend.22112002.xyz CNAME             # rsend-euw1.forge.rmta.net
+q _dmarc.22112002.xyz TXT              # v=DMARC1; p=…
+q mail.22112002.xyz A                  # Cloudflare's proxy IPs: it is a tunnel hostname now</code></pre>
+<p>Expected answers are in the comments. The one that bites is the MX: if anything other than Cloudflare's three hosts appears, Stalwart's DNS management has been re-enabled for MX, or someone added a record by hand, and inbound mail is going somewhere that cannot speak SMTP. If the resolver seems to lie, remember the records have a five-minute TTL; on build day I polled for five minutes before concluding a record really was still there, and it was.</p>
 </section>
 
-<section id="listening">
-<h2><span class="num">2.</span> Is anything listening?</h2>
-<p>The same command that cracked the Caddy problem, on both machines. It answers "is a program bound to this port on this address" with no interpretation.</p>
-<pre><code># srv1 — expected Stalwart sockets
-sudo ss -tlnp | grep stalwart
-# 100.72.72.58:25     smtp, behind HAProxy (PROXY-trusted)
-# 100.72.72.58:465    submissions, behind HAProxy
-# 100.72.72.58:993    imaps, behind HAProxy
-# 127.0.0.1:143       imap for Roundcube, loopback only
-# 127.0.0.1:587       submission for Roundcube, loopback only
-# 127.0.0.1:8080      http, admin via Tailscale Serve (Part 07)
-
-# VPS — expected HAProxy and Postfix sockets
-sudo ss -tlnp | grep -E 'haproxy|master'
-# &lt;vps-public-ip&gt;:25      haproxy
-# &lt;vps-public-ip&gt;:465     haproxy
-# &lt;vps-public-ip&gt;:993     haproxy
-# &lt;vps-tailscale-ip&gt;:25   master (postfix)
-# 127.0.0.1:25            master (postfix)</code></pre>
-<p>The thing to look at is the <em>address</em> column, not just the port. Port 25 appears twice on the VPS on purpose, bound to two different interfaces by two different programs. If HAProxy's line reads <code>0.0.0.0:25</code> or <code>*:25</code>, it has grabbed the Tailscale interface too, and Postfix either failed to start or is being shadowed. If a Stalwart listener reads <code>0.0.0.0</code> rather than the Tailscale IP, it is reachable from the LAN and I did not mean it to be.</p>
-<p>An empty result means the service is not running, and <code>systemctl status &lt;unit&gt;</code> is the next command, not a config change.</p>
+<section id="routing">
+<h2><span class="num">2.</span> Did Cloudflare receive it?</h2>
+<p>Cloudflare dashboard, the domain, <strong>Email › Email Routing › Activity log</strong>. Every message to the domain appears with a status. <strong>Delivered</strong> to the Worker is the good one. <strong>Dropped</strong> with an error means the Worker threw or rejected, which rung 3 explains. <strong>Rejected</strong> at Cloudflare's own edge means their spam or policy check refused it before any of my code ran. If the message is not in this log at all, the sender never reached Cloudflare: back to rung 1, or check the sender's own queue.</p>
+<p>Also worth a look on the same page: <strong>Routing rules</strong>, where the catch-all must read "Send to a Worker: mail-inbound-bridge" and be Active. It is the single switch between "mail arrives" and "mail vanishes".</p>
 </section>
 
-<section id="reach">
-<h2><span class="num">3.</span> Can the hops reach each other?</h2>
-<p>Listening is necessary, not sufficient. The next question is whether the specific pair of machines that need to talk actually can. <code>nc -vz</code> opens a TCP connection and closes it without sending anything, so it tests the network path and nothing else.</p>
-<pre><code># VPS → srv1, the inbound path HAProxy uses
-nc -vz 100.72.72.58 25
-nc -vz 100.72.72.58 465
-nc -vz 100.72.72.58 993
-
-# srv1 → VPS, the outbound path Stalwart's relay route uses
-nc -vz &lt;vps-tailscale-ip&gt; 25
-
-# Is the Tailscale link itself up and direct?
-tailscale status
-tailscale ping 100.72.72.58        # from the VPS
-tailscale ping &lt;vps-tailscale-ip&gt;  # from srv1</code></pre>
-<p>Reading <code>tailscale ping</code>: a reply via <code>DERP</code> means the two machines are talking through a Tailscale relay server, not directly. It still works, but adds latency and is a sign the VPS firewall is blocking UDP 41641. A reply naming the other machine's real address is a direct connection.</p>
-<p>If <code>nc</code> fails but <code>tailscale ping</code> works, the problem is on the destination machine: a firewall there, or the service bound to a different address (back to rung 2). If both fail, it is Tailscale: <code>systemctl status tailscaled</code> and look for <code>Needs login</code>, the exact state from the Homelab Tailscale story.</p>
+<section id="worker">
+<h2><span class="num">3.</span> Did the Worker get through the tunnel?</h2>
+<pre><code>cd ~/Projects/mailserver/worker
+npx wrangler tail mail-inbound-bridge --format pretty</code></pre>
+<p>Leave it running and send a test. The healthy line is the one from build day:</p>
+<pre><code>Email from:…@gmail.com to:olwethu@22112002.xyz size:6962 @ 10/8/2026, 4:09:41 PM - Ok</code></pre>
+<p>An exception in the output means the Worker could not complete the SMTP session. The two reasons I would expect: the tunnel on <code>srv1</code> is down (the VPC stream simply ends, and the Worker reports "SMTP connection closed before a complete reply"), or Stalwart answered with a <code>4xx</code> or <code>5xx</code>. A <code>5xx</code> becomes a rejection that the original sender sees as a bounce. For the tunnel: <code>systemctl status cloudflared</code> on <code>srv1</code>, and <code>https://webmail.22112002.xyz</code> from the laptop, which uses the same tunnel and is the fastest proof it is up.</p>
+<p>To separate "Worker cannot reach Stalwart" from "Stalwart refuses the message", run the Worker's job by hand on <code>srv1</code>:</p>
+<pre><code>python3 - &lt;&lt;'EOF'
+import smtplib, email.utils
+msg = f"From: Loopback Test &lt;someone@example.org&gt;\nTo: olwethu@22112002.xyz\nSubject: loopback test\nDate: {email.utils.formatdate()}\nMessage-ID: {email.utils.make_msgid(domain='example.org')}\n\nhello\n"
+s = smtplib.SMTP("127.0.0.1", 25, timeout=20); s.ehlo("gmail.com")
+print(s.sendmail("someone@example.org", ["olwethu@22112002.xyz"], msg)); s.quit()
+EOF</code></pre>
+<p>If that prints <code>{}</code> and the message lands in Spam (it is unsigned mail claiming someone else's domain, so Spam is correct), Stalwart's side is fine and the fault is between the Worker and the tunnel.</p>
 </section>
 
-<section id="tls">
-<h2><span class="num">4.</span> Is TLS right?</h2>
-<p><code>openssl s_client</code> opens a TLS connection and prints the certificate chain and the handshake result. Two forms, because the mail ports use TLS two different ways:</p>
-<pre><code># Implicit TLS (465 and 993): TLS from the first byte
-openssl s_client -connect mail.22112002.xyz:993 -servername mail.22112002.xyz &lt; /dev/null 2&gt;/dev/null \
-  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName
-
-# STARTTLS (25): plain SMTP first, then upgrade
-openssl s_client -connect mail.22112002.xyz:25 -starttls smtp -servername mail.22112002.xyz &lt; /dev/null 2&gt;/dev/null \
-  | openssl x509 -noout -subject -issuer -dates -ext subjectAltName</code></pre>
-<p>Four things to check in the output, in order:</p>
-<ol>
-  <li><strong>Issuer</strong> should be Let's Encrypt. A self-signed or "Stalwart" issuer means the ACME step in Part 07 did not complete and the server is using its bootstrap certificate.</li>
-  <li><strong>Subject Alternative Names</strong> must include <code>mail.22112002.xyz</code>. A certificate for the wrong name passes the handshake with <code>s_client</code> but every real client refuses it.</li>
-  <li><strong>Dates.</strong> <code>notBefore</code> in the past, <code>notAfter</code> in the future. The Homelab series has already hit "certificate is not yet valid" because of a clock stuck in the past; <code>timedatectl</code> on the machine that complains is the fix, not the certificate.</li>
-  <li><strong>Verify return code</strong> at the bottom of the unfiltered output should be <code>0 (ok)</code>.</li>
-</ol>
-<p>Note that both commands go through HAProxy to <code>srv1</code>, so a correct result here also proves rungs 2 and 3 for the public path in one go.</p>
+<section id="stalwart">
+<h2><span class="num">4.</span> What did Stalwart do with it?</h2>
+<p>Stalwart logs to a dated file, not the journal, with colour codes that need stripping. This is the one grep I used all day:</p>
+<pre><code>sudo sed 's/\x1b\[[0-9;]*m//g' /var/log/stalwart/stalwart.$(date +%F) \
+  | grep -E 'listenerId = "smtp"|queueName|message-ingest|dkim|dmarc|deliver|connect' \
+  | grep -v DEBUG | tail -40</code></pre>
+<p>For an inbound message the healthy sequence is: <code>smtp.spf-ehlo-fail</code> and <code>smtp.spf-from-fail</code> (soft fail against 127.0.0.1, always, ignore), <code>smtp.iprev-pass</code>, <code>smtp.dkim-pass</code> with the sender's domain, <code>smtp.dmarc-pass</code>, <code>message-ingest.ham</code>, <code>delivery.completed</code>. For an outbound message: <code>queue.authenticated-message-queued</code> on the submissions listener, then <code>delivery.connect</code> with <code>hostname = "smtp.resend.com"</code>, <code>delivery.delivered</code> with <code>code = 250</code> and a Resend id, <code>delivery.completed</code>.</p>
+<p>Two things the log will not tell you. A settings reload leaves no line, so if a route or strategy change seems ignored, assume the reload has not happened and run <strong>Management › Actions › Reload › Server settings</strong> again. And an outbound attempt that shows <code>hostname = "gmail-smtp-in.l.google.com"</code> and then <code>delivery.connect-error</code> after about 270 seconds is the strategy still saying <code>'mx'</code>; nothing at home can complete that connection.</p>
+<p>The queue itself is visible in the admin under <strong>Management › Emails › Queued</strong>, with retry times, and stuck messages can be deleted there.</p>
 </section>
 
-<section id="smtp">
-<h2><span class="num">5.</span> Does SMTP answer properly?</h2>
-<p><code>swaks</code> (Swiss Army Knife for SMTP, <code>apt install swaks</code>) has a whole SMTP conversation and prints every line of it. It is the fastest way to see the exact reply code a server gives, which Part 02 explained how to read.</p>
-<pre><code># Inbound: pretend to be another mail server delivering to me, over the public port
-swaks --to me@22112002.xyz --from test@example.com --server mail.22112002.xyz:25
-# expect 220 banner, 250 after each command, 250 2.0.0 ... queued after DATA
-
-# Authenticated submission: pretend to be my phone sending out
-swaks --to someone@gmail.com --from me@22112002.xyz \
-      --server mail.22112002.xyz:465 --tls-on-connect \
-      --auth LOGIN --auth-user me@22112002.xyz
-# prompts for the password; expect 235 after AUTH, then 250 ... queued
-
-# Relay check, from srv1 over Tailscale: Postfix must accept me
-swaks --to someone@gmail.com --from me@22112002.xyz --server &lt;vps-tailscale-ip&gt;:25
-
-# Relay check, from the laptop over Tailscale: Postfix must REFUSE me
-swaks --to someone@gmail.com --from me@22112002.xyz --server &lt;vps-tailscale-ip&gt;:25
-# expect 454 4.7.1 ... Relay access denied</code></pre>
-<p>Reading the codes: <code>2xx</code> is success, <code>4xx</code> is "not now, try later" and the sender will retry, <code>5xx</code> is "never" and the sender will bounce. The three-digit code is for machines; the text after it is for me, and Stalwart's and Postfix's text is specific enough to name the rule that fired.</p>
+<section id="resend">
+<h2><span class="num">5.</span> Did Resend deliver it?</h2>
+<p><code>resend.com</code>, left menu <strong>Logs</strong> (or <strong>Emails</strong>). Every message Stalwart handed over appears with Resend's id, the one from Stalwart's <code>delivery.delivered</code> line, and its own status: delivered, bounced, or complained. A message that Stalwart shows as <code>250</code> but Resend shows as bounced was refused by the final recipient's server, and Resend's entry has their reply. Also on this site: <strong>Domains</strong> must still show <code>22112002.xyz</code> as Verified, and the day's count against the 100-a-day cap.</p>
 </section>
 
-<section id="logs">
-<h2><span class="num">6.</span> Logs, in path order</h2>
-<p>By the time I am here, the rungs above have told me which hop is at fault, so I read that hop's log and not all five. In the order a message travels:</p>
-<table>
-<thead><tr><th>Hop</th><th>Command</th><th>What to look for</th></tr></thead>
-<tbody>
-<tr><td>HAProxy (VPS)</td><td><code>sudo journalctl -u haproxy -f</code></td><td>One line per connection: client IP and port, which frontend, which backend, bytes each way. <code>SD</code>/<code>SC</code> termination states and <code>DOWN</code> for the backend mean it could not reach srv1.</td></tr>
-<tr><td>Stalwart (srv1)</td><td><code>sudo journalctl -u stalwart -f</code>, plus the WebUI's live view and queue pages</td><td>The connecting IP (must match HAProxy's line if PROXY is working), SPF/DKIM/DMARC results on inbound, spam score, and on outbound which route it chose and what the relay replied.</td></tr>
-<tr><td>Postfix (VPS)</td><td><code>sudo tail -f /var/log/postfix.log</code></td><td><code>status=sent</code> with the remote server's 250 line; <code>status=deferred</code> with the 4xx reason (greylisting, rate limits, new-IP suspicion); <code>status=bounced</code> with the 5xx reason. <code>Relay access denied</code> here means a client Postfix does not trust.</td></tr>
-<tr><td>Caddy (srv1)</td><td><code>sudo journalctl -u caddy --no-pager -n 50</code></td><td>Only relevant for Roundcube and the MTA-STS page. Did the request for <code>webmail.22112002.xyz</code> arrive and which block handled it.</td></tr>
-<tr><td>PHP-FPM (srv1)</td><td><code>sudo journalctl -u php8.4-fpm</code> and Roundcube's own <code>logs/errors.log</code></td><td>Roundcube failures. Remember the LMS guide: PHP worker errors are silent unless <code>catch_workers_output = yes</code> is set in the pool config.</td></tr>
-</tbody>
-</table>
-<p>The one cross-check worth doing every time: pick a single connection and find it in two adjacent logs by timestamp. The same client IP appearing in HAProxy's line and Stalwart's line is the PROXY protocol proving itself. The same queue ID appearing in Stalwart's outbound log and then Postfix's inbound log is the relay route proving itself.</p>
+<section id="recipient">
+<h2><span class="num">6.</span> What did the recipient decide?</h2>
+<p>In Gmail, open the message, the three-dot menu, <strong>Show original</strong>. The summary block at the top has three lines that matter: <strong>SPF</strong> should say PASS with Resend's sending host, <strong>DKIM</strong> should say PASS with <code>d=22112002.xyz</code> (there may be two signatures, Stalwart's and Resend's, both for the domain), and <strong>DMARC</strong> should say PASS. If DMARC fails while DKIM passes, alignment is broken: the From address is not at <code>22112002.xyz</code>, or Resend's key is missing from DNS. If the message landed in Spam with all three passing, it is content or reputation, not authentication; mail-tester.com will say which.</p>
 </section>
 
 <section id="faults">
-<h2><span class="num">7.</span> Faults I expect to meet, and what each one looks like</h2>
+<h2><span class="num">7.</span> Faults met on the day, and ones I expect</h2>
 <table>
-<thead><tr><th>Symptom</th><th>Likely cause</th><th>Rung</th><th>Fix</th></tr></thead>
+<thead><tr><th>Symptom</th><th>Cause</th><th>Rung</th><th>Fix</th></tr></thead>
 <tbody>
-<tr><td>Senders report connection timeouts; <code>dig A mail…</code> returns Cloudflare IPs</td><td>MX target is proxied (orange cloud)</td><td>1</td><td>Set the <code>mail</code> A record to DNS only.</td></tr>
-<tr><td>Connections to 25/465/993 drop immediately; Stalwart logs garbage or "invalid PROXY header"</td><td>PROXY protocol mismatch: HAProxy sends <code>send-proxy-v2</code> but the listener does not trust the VPS, or the listener trusts it but HAProxy lacks <code>send-proxy-v2</code></td><td>5–6</td><td>Both ends must agree: <code>send-proxy-v2</code> on every <code>server</code> line and <code>&lt;vps-tailscale-ip&gt;</code> in the listener's trusted networks.</td></tr>
-<tr><td>Postfix: <code>454 4.7.1 Relay access denied</code> for mail from srv1</td><td><code>mynetworks</code> missing <code>100.72.72.58/32</code>, or srv1 connecting from a different address</td><td>5</td><td>Check <code>tailscale ip -4</code> on srv1 and fix <code>mynetworks</code>; <code>postfix reload</code>.</td></tr>
-<tr><td>Remote server: <code>450 4.7.1 Client host rejected: cannot find your reverse hostname</code></td><td>PTR missing or not yet propagated</td><td>1</td><td><code>dig -x &lt;vps-public-ip&gt;</code>; set or wait.</td></tr>
-<tr><td>Gmail: <code>550-5.7.26 This mail has been blocked because the sender is unauthenticated</code> (or "does not pass authentication checks")</td><td>SPF or DKIM failing or misaligned</td><td>1</td><td>Send to learndmarc.com and read which check failed; usually the connecting IP is not covered by SPF (route not used) or the DKIM selector is not published.</td></tr>
-<tr><td>mail-tester deducts for SPF/DKIM</td><td>Same as above</td><td>1</td><td>Same as above.</td></tr>
-<tr><td>mail-tester deducts for blacklist</td><td>The VPS IP has history from a previous tenant</td><td>—</td><td>MXToolbox blacklist check; request delisting or ask for a new IP.</td></tr>
-<tr><td>Roundcube: "Connection to IMAP server failed" or certificate name error</td><td>Roundcube connects to <code>127.0.0.1</code> and verifies the certificate against that name</td><td>4</td><td>Set <code>peer_name</code> to <code>mail.22112002.xyz</code> in the IMAP/SMTP connection options (Part 06), or use the loopback plain-text listener as designed.</td></tr>
+<tr><td>Outbound message tries <code>gmail-smtp-in.l.google.com:25</code> and logs <code>delivery.connect-error</code> after ~270 s, twice</td><td>Route and strategy saved but not applied; the strategy still says <code>'mx'</code></td><td>4</td><td><strong>Management › Actions › Reload › Server settings</strong>. The queued message retries through Resend on its own.</td></tr>
+<tr><td>Sender gets a delay notice; Email Routing activity log shows nothing; Stalwart log shows no inbound connection</td><td>MX still pointed at <code>mail.22112002.xyz</code>, which is a proxied tunnel name, so Cloudflare rewrote it to <code>_dc-mx.…</code> and nothing speaks SMTP there</td><td>1</td><td>Remove the old MX, let Email Routing add its three. Happened during the handover window on build day.</td></tr>
+<tr><td>Stalwart's Record Types unticked, but the MX and SPF records are still in the zone</td><td>Unticking stops management; it does not delete</td><td>1</td><td>Delete the rows by hand in Cloudflare DNS. Check again after five minutes; the first pass on build day removed only one of three.</td></tr>
+<tr><td>Email Routing shows <strong>Dropped</strong> for a message</td><td>The Worker threw: tunnel down, Stalwart unreachable, or a <code>4xx</code>/<code>5xx</code> from Stalwart</td><td>3</td><td><code>wrangler tail</code> for the error; <code>systemctl status cloudflared</code> on srv1; the loopback simulation to split the blame.</td></tr>
+<tr><td>Every inbound message logs <code>smtp.spf-ehlo-fail</code> and <code>smtp.spf-from-fail</code></td><td>Expected: the connection is from 127.0.0.1, which no SPF record lists</td><td>4</td><td>Nothing. DKIM and DMARC carry the verdict. Only worry if <code>dkim-pass</code> is missing too.</td></tr>
+<tr><td>Outbound stops mid-day; Resend logs show nothing new</td><td>The 100-a-day cap on the free plan</td><td>5</td><td>Wait for the day to roll over, or route a second relay by sender in the strategy editor.</td></tr>
+<tr><td>Email Routing overview shows <strong>Syncing</strong> / <strong>Locked</strong> right after enabling</td><td>Cloudflare confirming its own DNS records</td><td>2</td><td>Wait a minute and refresh. It read Enabled within about a minute on build day.</td></tr>
+<tr><td><code>wrangler deploy</code> prints "No targets deployed"</td><td>Normal for an Email Worker; it has no HTTP route</td><td>3</td><td>Nothing. The catch-all rule is the trigger.</td></tr>
+<tr><td><code>wrangler login</code> hangs with no browser</td><td>It needs a real terminal and a browser on the same machine</td><td>3</td><td>Run it in a terminal window, not from a script or a non-interactive prompt.</td></tr>
+<tr><td>Worker logged the message two minutes before Stalwart saw the EHLO</td><td>Unknown: cold VPC connection, or Stalwart's pre-DATA checks</td><td>3–4</td><td>Unresolved on build day. Time a second message; if it repeats, raise it upstream.</td></tr>
+<tr><td>Roundcube: "Connection to IMAP server failed" or a certificate name error</td><td>Roundcube connects to <code>127.0.0.1</code> and verifies the certificate against that name</td><td>4</td><td><code>peer_name</code> = <code>mail.22112002.xyz</code> in both <code>_conn_options</code> arrays (part 06).</td></tr>
 <tr><td>"certificate is not yet valid" anywhere</td><td>Clock wrong on the complaining machine</td><td>4</td><td><code>timedatectl</code>, <code>timedatectl set-ntp true</code>.</td></tr>
-<tr><td>After a VPS reboot, nothing reaches srv1; HAProxy backend <code>DOWN</code></td><td>Tailscale on the VPS is in <code>Needs login</code> or not started</td><td>3</td><td><code>systemctl status tailscaled</code>; <code>sudo tailscale up</code>. Consider disabling key expiry for the VPS in the Tailscale admin console.</td></tr>
-<tr><td>Postfix: every outbound <code>status=deferred</code> with "connection timed out" to port 25</td><td>Provider still blocking outbound 25 (Hetzner before the ticket)</td><td>3</td><td><code>nc -vz gmail-smtp-in.l.google.com 25</code> from the VPS; if it hangs, chase the ticket. Nothing in my config can fix this.</td></tr>
-<tr><td>Phone connects, Thunderbird connects, but mail from other servers never arrives</td><td>MX record missing or pointing elsewhere</td><td>1</td><td><code>dig MX</code>. Stalwart's automatic DNS management may not have run; check the domain's DNS page in the WebUI.</td></tr>
+<tr><td>Gmail's Show original: DKIM pass, DMARC fail</td><td>Alignment: Resend's DKIM record missing, or the From address is at another domain</td><td>6</td><td><code>q resend._domainkey.22112002.xyz TXT</code>; check the Roundcube identity's From address.</td></tr>
+<tr><td>Phone JMAP app cannot find the server</td><td><code>mail.22112002.xyz</code> not routed through the tunnel, or <code>STALWART_PUBLIC_URL</code> unset</td><td>1</td><td><code>curl -sI https://mail.22112002.xyz/.well-known/jmap</code> must return 307; check the Caddy block and the env file.</td></tr>
 </tbody>
 </table>
 </section>
 
 <section id="external">
 <h2><span class="num">8.</span> External checkers worth trusting</h2>
-<p>Everything above is me looking at my own system. These look at it from the outside, which is the view that matters.</p>
 <ul>
-  <li><strong>mail-tester.com</strong>: a one-shot score with the deductions explained. Good for a before-and-after on any change to SPF, DKIM or content.</li>
-  <li><strong>mxtoolbox.com</strong>: MX lookup, SMTP diagnostics (connects to port 25 and reports banner, STARTTLS, reverse DNS, open relay), and the blacklist check across dozens of lists. Run the blacklist check on the day the VPS is rented.</li>
-  <li><strong>learndmarc.com</strong>: send a message, watch it evaluate SPF, DKIM and DMARC live with every DNS lookup shown. The best explanation of a failure I have found.</li>
-  <li><strong>hardenize.com</strong> or <strong>internet.nl</strong>: the transport-security view: MTA-STS, TLS-RPT, DANE, DNSSEC, TLS versions. Expect DANE to be red until DNSSEC is on for the zone, which is a later project.</li>
-  <li><strong>Google Postmaster Tools</strong>: once there is real volume to Gmail, this shows how Google rates the domain and IP over time. Needs the domain verified; worth setting up in the first week so there is history when something changes.</li>
+  <li><strong>mail-tester.com</strong>: a one-shot score with the deductions explained. Send to the address it gives from Roundcube; the message goes through Resend like any other, so the score reflects what recipients see.</li>
+  <li><strong>learndmarc.com</strong>: send a message, watch it evaluate SPF, DKIM and DMARC live with every DNS lookup shown. The clearest explanation of an alignment failure I have found.</li>
+  <li><strong>mxtoolbox.com</strong>: the MX lookup should show Cloudflare's three hosts; the SMTP diagnostic against them is Cloudflare's problem, not mine, which is the point.</li>
+  <li><strong>Google Postmaster Tools</strong>: once there is real volume to Gmail, this shows how Google rates the domain over time. The IP reputation shown will be Resend's.</li>
 </ul>
 </section>
 
 <section id="routine">
 <h2><span class="num">9.</span> The five-minute routine after any change</h2>
-<p>Once the build is done, most faults will come from me changing something: a DNS record, a listener, a Postfix line, an upgrade. Rather than wait for a bounce to tell me, I run the first five rungs in one go after every change. This is not a monitoring system; it is the ladder, scripted, so that I cannot skip a rung because I was sure it was fine.</p>
+<p>Most faults will come from me changing something: a DNS record, a route, a Caddy block, an upgrade of Stalwart or the Worker. Rather than wait for a bounce to tell me, I run the first rungs that need no dashboard in one go:</p>
 <pre><code>#!/usr/bin/env bash
-# mailcheck.sh — run from the laptop, on any network. Replace the placeholders once.
+# mailcheck.sh — run from the laptop, on any network.
 set -u
-D=22112002.xyz; H=mail.$D; IP=&lt;vps-public-ip&gt;
-
-echo "== 1 DNS";        dig +short MX $D; dig +short A $H; dig +short -x $IP
-echo "== 1 SPF/DMARC";  dig +short TXT $D; dig +short TXT _dmarc.$D
-echo "== 3 reach";      for p in 25 465 993; do nc -vz -w 5 $H $p 2&gt;&amp;1 | tail -1; done
-echo "== 4 TLS 993";    openssl s_client -connect $H:993 -servername $H &lt;/dev/null 2&gt;/dev/null \
-                          | openssl x509 -noout -subject -enddate
-echo "== 4 TLS 25";     openssl s_client -connect $H:25 -starttls smtp -servername $H &lt;/dev/null 2&gt;/dev/null \
-                          | openssl x509 -noout -subject -enddate
-echo "== 5 SMTP";       swaks --quit-after RCPT --to me@$D --from check@example.com --server $H:25 2&gt;&amp;1 \
-                          | grep -E '^&lt;[\*-] (220|250|4|5)' | head -5</code></pre>
-<p>Reading it takes thirty seconds: three DNS answers that agree, two TXT records, three <code>succeeded</code> lines, two certificates with the right name and a future date, and a column of <code>250</code>s. Anything else names the rung, and the matching section above says what to do.</p>
-<p>The one rung it cannot climb is 6: it does not read logs, by design. If the script is green and mail still does not arrive, the fault is inside Stalwart or Postfix and the logs table is the next stop.</p>
-<div class="callout tip"><div class="label">Keep the output</div>
-<p>Save a known-good run as <code>mailcheck.good.txt</code>. The next time something breaks, <code>diff</code> against it shows exactly which line changed, which is usually the whole diagnosis.</p></div>
+D=22112002.xyz
+q(){ curl -s "https://cloudflare-dns.com/dns-query?name=$1&amp;type=$2" -H 'accept: application/dns-json' \
+  | python3 -c 'import sys,json; a=json.load(sys.stdin).get("Answer"); print(" | ".join(x["data"][:70] for x in a) if a else "(none)")'; }
+echo "MX      $(q $D MX)"
+echo "SPF     $(q $D TXT)"
+echo "CF DKIM $(q cf2024-1._domainkey.$D TXT | cut -c1-40)"
+echo "RS DKIM $(q resend._domainkey.$D TXT | cut -c1-40)"
+echo "rsend   $(q rsend.$D CNAME)"
+echo "DMARC   $(q _dmarc.$D TXT)"
+echo "JMAP    $(curl -s -o /dev/null -w '%{http_code}' https://mail.$D/.well-known/jmap)   (want 307)"
+echo "admin   $(curl -s -o /dev/null -w '%{http_code}' https://mail.$D/admin)   (want 403)"
+echo "webmail $(curl -s -o /dev/null -w '%{http_code}' https://webmail.$D/)   (want 200)"
+ssh srv1@srv1 'systemctl is-active stalwart cloudflared caddy php8.4-fpm | tr "\n" " "; echo; free -h | sed -n 2p'</code></pre>
+<p>Save a known-good run and diff against it. The first line that differs is the rung to start on.</p>
 </section>
 
 <section id="glossary">
 <h2>Glossary for this part</h2>
 <dl class="gloss">
-<dt>Rung</dt><dd>One layer of the system with one command that confirms or eliminates it. Six rungs here.</dd>
-<dt><code>dig</code></dt><dd>The DNS lookup tool. <code>+short</code> prints only the answer; <code>@1.1.1.1</code> asks a specific resolver; <code>-x</code> does a reverse lookup.</dd>
-<dt><code>ss -tlnp</code></dt><dd>Lists listening TCP sockets with the program that owns each one. The address column matters as much as the port.</dd>
-<dt><code>nc -vz</code></dt><dd>Opens and immediately closes a TCP connection, reporting whether it succeeded. Tests the path, not the protocol.</dd>
-<dt><code>openssl s_client</code></dt><dd>Makes a TLS connection by hand and shows the certificate and handshake. <code>-starttls smtp</code> for port 25, plain for 465 and 993.</dd>
-<dt><code>swaks</code></dt><dd>A command-line SMTP client that prints the whole conversation. The quickest way to see a server's exact reply code.</dd>
-<dt>DERP</dt><dd>Tailscale's relay servers, used when two machines cannot connect directly. Working but slower; usually means a UDP port is blocked.</dd>
-<dt>Termination state</dt><dd>The two-letter code in an HAProxy log line saying how and why the connection ended. <code>--</code> is normal; anything with <code>S</code> or <code>C</code> first is the server or client side closing unexpectedly.</dd>
+<dt>Activity log (Email Routing)</dt><dd>Cloudflare's per-message record of what it received for the domain and what it did with it. Rung 2.</dd>
+<dt><code>wrangler tail</code></dt><dd>Live stream of a Worker's console output and the result of each invocation. Rung 3.</dd>
+<dt>Loopback simulation</dt><dd>Doing the Worker's SMTP conversation by hand from srv1 to 127.0.0.1:25, to prove Stalwart's half without involving Cloudflare.</dd>
+<dt>DoH query</dt><dd>A DNS lookup over HTTPS to <code>cloudflare-dns.com/dns-query</code>; the same answers as <code>dig @1.1.1.1</code> on a machine without <code>dig</code>.</dd>
+<dt>Show original</dt><dd>Gmail's view of a received message's raw headers with its SPF, DKIM and DMARC verdicts summarised at the top. Rung 6.</dd>
+<dt>Reload server settings</dt><dd>The Stalwart action without which a saved route or strategy is just a saved form.</dd>
 </dl>
 </section>
 
 <div class="pager">
-  <a href="08-build-front-door.html">← 08 · Build part 2: the front door</a>
+  <a href="08-build-front-door.html">← 08 · Build part 2: the free front door</a>
   <a href="glossary.html">Glossary →</a>
 </div>
 </main>
