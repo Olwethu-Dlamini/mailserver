@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glossary · Running My Own Mail Server</title>
+<meta name="description" content="Every term used across the mail server guide series, in one alphabetical list, with the part where it first matters.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a class="active" href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Reference</div>
+  <h1>Glossary</h1>
+  <p class="lead">Every term from the series in one place, in the plain words I would use to explain it to someone else. The number after each term is the part where it first matters.</p>
+  <div class="meta">Alphabetical. Commands are listed under their own names.</div>
+</header>
+
+<section id="terms">
+<dl class="gloss">
+
+<dt>A / AAAA record <span class="muted">· 01</span></dt>
+<dd>The DNS record that maps a hostname to an IPv4 (A) or IPv6 (AAAA) address. The MX record must point at a hostname that has one of these; mine is <code>mail.22112002.xyz</code> → the VPS's public IP.</dd>
+
+<dt>ACME <span class="muted">· 04</span></dt>
+<dd>The protocol Let's Encrypt and other certificate authorities use to issue certificates automatically. The server proves it controls the name, the CA hands over a certificate, and the whole thing repeats before expiry without me doing anything.</dd>
+
+<dt>Aggregate report <span class="muted">· 03</span></dt>
+<dd>A daily XML summary that receivers send to the address in your DMARC record, listing every IP that sent mail claiming to be your domain and whether it passed. The way you find out who is sending as you.</dd>
+
+<dt>Alignment <span class="muted">· 03</span></dt>
+<dd>DMARC's extra requirement: it is not enough for SPF or DKIM to pass, the domain they passed <em>for</em> must match the domain in the visible From header. Stops someone passing SPF for their own domain while displaying mine.</dd>
+
+<dt>Autoconfig / autodiscover <span class="muted">· 07</span></dt>
+<dd>DNS records and small web endpoints that let Thunderbird (autoconfig) and Outlook (autodiscover) fill in server settings from just an email address. Stalwart publishes them.</dd>
+
+<dt>Bootstrap mode <span class="muted">· 04</span></dt>
+<dd>What Stalwart does on first start with no <code>config.json</code>: listens on port 8080 with only the web admin, prints a one-time admin password to the log, and waits for the setup wizard to be completed.</dd>
+
+<dt>Bounce <span class="muted">· 02</span></dt>
+<dd>A message the sending server gives up on and returns to the sender with the reason, after a permanent <code>5xx</code> reply or after retrying a <code>4xx</code> for too long.</dd>
+
+<dt>CAA record <span class="muted">· 03</span></dt>
+<dd>A DNS record saying which certificate authorities may issue certificates for the domain. Stalwart publishes one naming Let's Encrypt.</dd>
+
+<dt>Caddy <span class="muted">· 01</span></dt>
+<dd>The web server already on <code>srv1</code>. In this series it serves Roundcube and, optionally, the MTA-STS policy, both behind the Cloudflare Tunnel. It has nothing to do with SMTP or IMAP.</dd>
+
+<dt>CGNAT <span class="muted">· 01</span></dt>
+<dd>Carrier-grade NAT: my ISP shares one public IP across many customers, so I have no public address of my own and nothing on the internet can start a connection to my house. The premise of the whole series.</dd>
+
+<dt>Cloudflare Tunnel <span class="muted">· 01</span></dt>
+<dd>An outbound connection from <code>cloudflared</code> on my VM to Cloudflare, down which Cloudflare relays web requests. It carries HTTP and HTTPS only, which is why it publishes my websites and cannot publish a mail server.</dd>
+
+<dt>Deferred <span class="muted">· 02</span></dt>
+<dd>A message the sending server could not deliver right now (a <code>4xx</code> reply, or no connection) and has put back in its queue to retry later.</dd>
+
+<dt><code>dig</code> <span class="muted">· 09</span></dt>
+<dd>The DNS lookup tool. <code>dig MX domain</code>, <code>dig A host</code>, <code>dig -x ip</code> for reverse, <code>dig TXT name</code> for SPF, DKIM and DMARC. <code>@1.1.1.1</code> asks a specific resolver.</dd>
+
+<dt>DKIM <span class="muted">· 03</span></dt>
+<dd>DomainKeys Identified Mail. The sending server signs each message with a private key; the public key sits in DNS under a selector. The receiver verifies the signature, proving the message came from a server holding my key and was not altered in transit.</dd>
+
+<dt>DMARC <span class="muted">· 03</span></dt>
+<dd>A DNS policy that ties SPF and DKIM to the From header (alignment) and tells receivers what to do when both fail: nothing (<code>p=none</code>), junk it (<code>quarantine</code>) or refuse it (<code>reject</code>). Also where the aggregate reports get sent.</dd>
+
+<dt>DNS-01 <span class="muted">· 04</span></dt>
+<dd>The ACME challenge where the server proves control of a name by writing a TXT record into its DNS zone. Needs no open ports at all, which is why it is the right one for a server behind CGNAT. Stalwart does it through the Cloudflare API.</dd>
+
+<dt>DNSBL <span class="muted">· 03</span></dt>
+<dd>DNS-based blocklist. A receiving server looks up the connecting IP in a list such as Spamhaus by doing a DNS query; a hit means "this address has sent spam" and the connection is refused or scored down.</dd>
+
+<dt>DNSSEC <span class="muted">· 03</span></dt>
+<dd>Cryptographic signatures on DNS records so a resolver can tell they were not forged. Required for DANE. Not part of this build; a later project.</dd>
+
+<dt>DANE / TLSA <span class="muted">· 03</span></dt>
+<dd>DNS-based Authentication of Named Entities: a TLSA record pins which certificate the mail server should present, so a sender can refuse a connection with a different one. Only trustworthy with DNSSEC, which I do not have yet.</dd>
+
+<dt>Envelope vs header <span class="muted">· 02</span></dt>
+<dd>The envelope is what the servers say to each other in SMTP (<code>MAIL FROM</code>, <code>RCPT TO</code>). The headers are inside the message (<code>From:</code>, <code>To:</code>). They can differ, and SPF checks the envelope while DMARC checks the header.</dd>
+
+<dt>FCrDNS <span class="muted">· 03</span></dt>
+<dd>Forward-confirmed reverse DNS: the PTR of the connecting IP names a host, and that host's A record is the same IP. One of the first things a receiver checks, and the reason the VPS needs an editable PTR.</dd>
+
+<dt>Greylisting <span class="muted">· 03</span></dt>
+<dd>A receiving server deliberately replying <code>4xx</code> the first time it sees a new sender, on the theory that real servers retry and spam tools do not. Why a first message to a new domain can take fifteen minutes.</dd>
+
+<dt>Grey cloud / DNS only <span class="muted">· 05</span></dt>
+<dd>A Cloudflare DNS record that resolves to the real IP, not to Cloudflare's proxy. The <code>mail</code> A record must be grey; every other record in the zone is orange, which is what makes this the easiest mistake to make.</dd>
+
+<dt>HAProxy <span class="muted">· 05</span></dt>
+<dd>The load balancer and proxy running on the VPS. Here it works in TCP mode: it accepts connections on the public 25, 465 and 993 and forwards the raw bytes to Stalwart over Tailscale, adding a PROXY protocol header.</dd>
+
+<dt>IMAP <span class="muted">· 02</span></dt>
+<dd>The protocol a mail client uses to read a mailbox that stays on the server: folders, flags, search. Port 993 with implicit TLS for the public, 143 on loopback for Roundcube.</dd>
+
+<dt>Implicit TLS vs STARTTLS <span class="muted">· 02</span></dt>
+<dd>Implicit: the connection is TLS from the first byte (ports 465, 993). STARTTLS: the connection starts in plain text and upgrades on request (port 25, 587, 143). Server-to-server mail on 25 is always STARTTLS, because the other side may not support TLS at all.</dd>
+
+<dt>JMAP <span class="muted">· 04</span></dt>
+<dd>A modern JSON-over-HTTPS replacement for IMAP and the client side of SMTP, built by the same community that runs Fastmail. Stalwart speaks it natively; few clients do yet.</dd>
+
+<dt>Let's Encrypt <span class="muted">· 04</span></dt>
+<dd>The free certificate authority everything here uses, through ACME.</dd>
+
+<dt>MagicDNS <span class="muted">· 07</span></dt>
+<dd>Tailscale's feature that gives every device a name (<code>srv1</code>, <code>pve</code>) resolvable from any other device in the mesh.</dd>
+
+<dt>mail-tester <span class="muted">· 08</span></dt>
+<dd>mail-tester.com: send a message to a one-time address and get a score out of ten with every deduction explained. The quickest outside opinion on deliverability.</dd>
+
+<dt>ManageSieve <span class="muted">· 04</span></dt>
+<dd>The protocol for uploading Sieve filter scripts to the server from a client. Port 4190. Stalwart supports it; Roundcube has a plugin for it.</dd>
+
+<dt>MDA <span class="muted">· 02</span></dt>
+<dd>Mail delivery agent: the component that takes a message the MTA has accepted and writes it into the right mailbox. In Stalwart it is not a separate program.</dd>
+
+<dt>MSA <span class="muted">· 02</span></dt>
+<dd>Mail submission agent: the server a mail <em>client</em> hands outgoing mail to, after authenticating. Ports 465 or 587. The same software as the MTA but a different door with different rules.</dd>
+
+<dt>MTA <span class="muted">· 02</span></dt>
+<dd>Mail transfer agent: the server-to-server part. Accepts mail from other MTAs on port 25 and delivers outgoing mail to other MTAs by looking up their MX. Postfix, Exim and Stalwart's SMTP component are MTAs.</dd>
+
+<dt>MTA-STS <span class="muted">· 03</span></dt>
+<dd>A DNS record plus a policy file served over HTTPS saying "always use TLS when delivering to me, and expect this certificate name". Stops a downgrade to plain text. The policy file can be served through the Cloudflare Tunnel because it is just HTTPS.</dd>
+
+<dt>MUA <span class="muted">· 02</span></dt>
+<dd>Mail user agent: the program a person reads and writes mail in. Thunderbird, the phone's mail app, Roundcube.</dd>
+
+<dt>MX record <span class="muted">· 01</span></dt>
+<dd>The DNS record naming which host accepts mail for a domain, with a priority number. <code>22112002.xyz MX 10 mail.22112002.xyz</code>. Must name a host with an A record, never a proxied one.</dd>
+
+<dt><code>nc</code> <span class="muted">· 09</span></dt>
+<dd>netcat. <code>nc -vz host port</code> opens and closes a TCP connection, proving the path works without speaking any protocol.</dd>
+
+<dt>Open relay <span class="muted">· 05</span></dt>
+<dd>A mail server that will forward anyone's mail to anyone. Found and abused by spammers within hours; the IP's reputation is then gone. Postfix's <code>mynetworks</code> and <code>reject_unauth_destination</code> exist to prevent this.</dd>
+
+<dt><code>openssl s_client</code> <span class="muted">· 09</span></dt>
+<dd>Makes a TLS connection by hand and prints the certificate chain. <code>-starttls smtp</code> for port 25; plain for 465 and 993; <code>-servername</code> so the server knows which certificate to present.</dd>
+
+<dt>PBL <span class="muted">· 01</span></dt>
+<dd>Spamhaus Policy Block List: IP ranges whose owners have declared them end-user space that should never send mail directly. Residential and mobile ranges are on it, which is one reason mail cannot leave from home.</dd>
+
+<dt>PHP-FPM <span class="muted">· 06</span></dt>
+<dd>The PHP process manager already on <code>srv1</code> for the LMS. Roundcube is a PHP application and runs in it.</dd>
+
+<dt>POP3 <span class="muted">· 02</span></dt>
+<dd>The older mailbox protocol that downloads and usually deletes. Stalwart supports it; I am not enabling it.</dd>
+
+<dt>Postfix <span class="muted">· 05</span></dt>
+<dd>The classic open-source MTA. On the VPS it does one thing: accept outbound mail from <code>srv1</code> over Tailscale and deliver it to the world from the VPS's public IP.</dd>
+
+<dt>PROXY protocol <span class="muted">· 05</span></dt>
+<dd>A header HAProxy prepends to a forwarded connection carrying the original client's IP and port. Without it Stalwart would see every inbound connection as coming from the VPS. The receiving side must be told which addresses it may trust to send one.</dd>
+
+<dt>PTR record <span class="muted">· 01</span></dt>
+<dd>Reverse DNS: the hostname an IP address claims. Set by whoever controls the IP block, so it is set in the VPS provider's console, not in Cloudflare.</dd>
+
+<dt>Queue <span class="muted">· 02</span></dt>
+<dd>Where an MTA keeps messages it has accepted but not yet delivered. A healthy queue is nearly empty; a message sitting in it for hours is a fault to chase.</dd>
+
+<dt>Reply codes <span class="muted">· 02</span></dt>
+<dd>The three-digit numbers an SMTP server answers with. <code>2xx</code> success, <code>3xx</code> "go on" (after <code>DATA</code>), <code>4xx</code> temporary failure (retry later), <code>5xx</code> permanent failure (bounce).</dd>
+
+<dt>RocksDB <span class="muted">· 04</span></dt>
+<dd>The embedded key-value database Stalwart uses by default to store everything: configuration, accounts, messages, indexes. One directory under <code>/var/lib/stalwart</code>, no separate database server.</dd>
+
+<dt>Roundcube <span class="muted">· 06</span></dt>
+<dd>Open-source webmail in PHP. It is an IMAP and SMTP client that happens to run in a browser; it holds no mail of its own.</dd>
+
+<dt>Selector <span class="muted">· 03</span></dt>
+<dd>The label that picks which DKIM key a message was signed with: <code>selector._domainkey.domain</code>. Lets a domain have several keys and rotate them.</dd>
+
+<dt>Sieve <span class="muted">· 04</span></dt>
+<dd>The standard server-side mail filtering language ("if subject contains X, file into folder Y"). Stalwart runs Sieve scripts at delivery.</dd>
+
+<dt>Smarthost / relay <span class="muted">· 05</span></dt>
+<dd>A server that another mail server hands all its outbound mail to, instead of delivering directly. Postfix on the VPS is Stalwart's smarthost.</dd>
+
+<dt>SMTP <span class="muted">· 02</span></dt>
+<dd>Simple Mail Transfer Protocol: the line-by-line conversation (<code>EHLO</code>, <code>MAIL FROM</code>, <code>RCPT TO</code>, <code>DATA</code>) used both for clients submitting mail and for servers handing it to each other.</dd>
+
+<dt>SPF <span class="muted">· 03</span></dt>
+<dd>Sender Policy Framework: a TXT record listing which IPs may send mail for the domain. <code>v=spf1 mx -all</code> means "only the hosts in my MX record, refuse everything else". The receiver checks the connecting IP against it.</dd>
+
+<dt>SRV record <span class="muted">· 03</span></dt>
+<dd>A DNS record advertising which host and port provide a service, used by some clients to discover IMAP and submission servers. Stalwart publishes them.</dd>
+
+<dt><code>ss -tlnp</code> <span class="muted">· 09</span></dt>
+<dd>Lists every listening TCP socket with its address, port and owning program. The fastest way to answer "is anything actually on that port".</dd>
+
+<dt>Stalwart <span class="muted">· 04</span></dt>
+<dd>The mail server. One binary written in Rust that is the MTA, MSA, MDA, IMAP, JMAP, POP3 and ManageSieve server, spam filter, and web admin, configured through its WebUI and stored in RocksDB. Runs on <code>srv1</code>.</dd>
+
+<dt>Submission <span class="muted">· 02</span></dt>
+<dd>A mail client handing an outgoing message to its own server, with authentication. Port 465 (implicit TLS) or 587 (STARTTLS). Distinct from server-to-server transfer on 25.</dd>
+
+<dt><code>swaks</code> <span class="muted">· 09</span></dt>
+<dd>Swiss Army Knife for SMTP: a command-line client that has a complete SMTP conversation and prints every line. The quickest way to see exactly what a server replies.</dd>
+
+<dt>Tailscale <span class="muted">· 01</span></dt>
+<dd>The WireGuard-based mesh that already joins <code>pve</code>, <code>srv1</code> and my laptop. The VPS joins it too, and every connection between the VPS and <code>srv1</code> travels inside it.</dd>
+
+<dt>Tailscale Serve <span class="muted">· 07</span></dt>
+<dd>A Tailscale feature that publishes a local port to the rest of the mesh over HTTPS with a valid certificate. How I reach Stalwart's admin page without exposing it anywhere public.</dd>
+
+<dt>TCP mode <span class="muted">· 05</span></dt>
+<dd>HAProxy forwarding raw bytes without interpreting the protocol, as opposed to HTTP mode. Required here because SMTP and IMAP are not HTTP.</dd>
+
+<dt>TLS-RPT <span class="muted">· 03</span></dt>
+<dd>A DNS record giving an address where other servers report TLS failures when delivering to me. The companion to MTA-STS.</dd>
+
+<dt>VPS <span class="muted">· 01</span></dt>
+<dd>Virtual private server: a small rented virtual machine with its own public IP. In this design it runs only HAProxy, Postfix and Tailscale, and is the only part that costs money.</dd>
+
+</dl>
+</section>
+
+<div class="pager">
+  <a href="09-testing.html">← 09 · Testing and troubleshooting</a>
+  <a href="index.html">Series index →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
