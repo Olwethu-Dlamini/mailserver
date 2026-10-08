@@ -99,7 +99,7 @@
 <dd>A Cloudflare DNS record that resolves to the real IP, not to Cloudflare's proxy. The <code>mail</code> A record must be grey; every other record in the zone is orange, which is what makes this the easiest mistake to make.</dd>
 
 <dt>HAProxy <span class="muted">· 05</span></dt>
-<dd>The load balancer and proxy running on the VPS. Here it works in TCP mode: it accepts connections on the public 25, 465 and 993 and forwards the raw bytes to Stalwart over Tailscale, adding a PROXY protocol header.</dd>
+<dd><em>From the VPS design in the original part 05, never built.</em> The load balancer and proxy running on the VPS. Here it works in TCP mode: it accepts connections on the public 25, 465 and 993 and forwards the raw bytes to Stalwart over Tailscale, adding a PROXY protocol header.</dd>
 
 <dt>IMAP <span class="muted">· 02</span></dt>
 <dd>The protocol a mail client uses to read a mailbox that stays on the server: folders, flags, search. Port 993 with implicit TLS for the public, 143 on loopback for Roundcube.</dd>
@@ -159,10 +159,10 @@
 <dd>The older mailbox protocol that downloads and usually deletes. Stalwart supports it; I am not enabling it.</dd>
 
 <dt>Postfix <span class="muted">· 05</span></dt>
-<dd>The classic open-source MTA. On the VPS it does one thing: accept outbound mail from <code>srv1</code> over Tailscale and deliver it to the world from the VPS's public IP.</dd>
+<dd><em>From the VPS design in the original part 05, never built.</em> The classic open-source MTA. On the VPS it does one thing: accept outbound mail from <code>srv1</code> over Tailscale and deliver it to the world from the VPS's public IP.</dd>
 
 <dt>PROXY protocol <span class="muted">· 05</span></dt>
-<dd>A header HAProxy prepends to a forwarded connection carrying the original client's IP and port. Without it Stalwart would see every inbound connection as coming from the VPS. The receiving side must be told which addresses it may trust to send one.</dd>
+<dd><em>From the VPS design in the original part 05, never built.</em> A header HAProxy prepends to a forwarded connection carrying the original client's IP and port. Without it Stalwart would see every inbound connection as coming from the VPS. The receiving side must be told which addresses it may trust to send one.</dd>
 
 <dt>PTR record <span class="muted">· 01</span></dt>
 <dd>Reverse DNS: the hostname an IP address claims. Set by whoever controls the IP block, so it is set in the VPS provider's console, not in Cloudflare.</dd>
@@ -216,7 +216,7 @@
 <dd>A Tailscale feature that publishes a local port to the rest of the mesh over HTTPS with a valid certificate. How I reach Stalwart's admin page without exposing it anywhere public.</dd>
 
 <dt>TCP mode <span class="muted">· 05</span></dt>
-<dd>HAProxy forwarding raw bytes without interpreting the protocol, as opposed to HTTP mode. Required here because SMTP and IMAP are not HTTP.</dd>
+<dd><em>From the VPS design in the original part 05, never built.</em> HAProxy forwarding raw bytes without interpreting the protocol, as opposed to HTTP mode. Required here because SMTP and IMAP are not HTTP.</dd>
 
 <dt>TLS-RPT <span class="muted">· 03</span></dt>
 <dd>A DNS record giving an address where other servers report TLS failures when delivering to me. The companion to MTA-STS.</dd>
@@ -224,6 +224,25 @@
 <dt>VPS <span class="muted">· 01</span></dt>
 <dd>Virtual private server: a small rented virtual machine with its own public IP. In this design it runs only HAProxy, Postfix and Tailscale, and is the only part that costs money.</dd>
 
+
+<dt>Cloudflare Email Routing <span class="muted">· 05</span></dt>
+<dd>Cloudflare's free service that holds the MX records for a domain and receives its mail on Cloudflare's own servers. On its own it only forwards to another mailbox; with an Email Worker it can hand the raw message to code you write.</dd>
+<dt>Email Worker <span class="muted">· 05</span></dt>
+<dd>A Cloudflare Worker with an <code>email()</code> handler. Email Routing calls it once per inbound message with the envelope and the unchanged raw bytes. Mine (<code>worker/</code>) speaks SMTP to Stalwart.</dd>
+<dt>Workers VPC <span class="muted">· 05</span></dt>
+<dd>A beta Cloudflare feature, free on every plan, that lets a Worker open a plain TCP connection to any address reachable through a Cloudflare Tunnel you own. It is how the Worker reaches <code>127.0.0.1:25</code> on srv1 without a public port.</dd>
+<dt>Resend <span class="muted">· 05</span></dt>
+<dd>A transactional email provider with a free tier (100 messages a day, 3,000 a month, no branding). Stalwart hands outgoing mail to it over authenticated SMTP on port 465, and it delivers from its own reputable IPs, signed as my domain.</dd>
+<dt>Relay route <span class="muted">· 05</span></dt>
+<dd>Stalwart's name for "send through this other server instead of looking up MX records". Settings › MTA › Outbound › Routes, type Relay Host.</dd>
+<dt>Outbound strategy <span class="muted">· 08</span></dt>
+<dd>The expression in Settings › MTA › Outbound › Strategy that picks a route per recipient. Mine reads: if the recipient domain is local, <code>'local'</code>, else <code>'resend'</code>.</dd>
+<dt>Reload server settings <span class="muted">· 08</span></dt>
+<dd>Management › Actions › Reload › Server settings. Most Stalwart configuration changes do nothing until this runs. Forgetting it cost a message two timed-out delivery attempts on 8 October.</dd>
+<dt>_dc-mx record <span class="muted">· 08</span></dt>
+<dd>A name Cloudflare invents when an MX record points at a proxied hostname, so the MX resolves to something. It is a symptom that the MX target is wrong for mail, not a feature.</dd>
+<dt>JMAP client <span class="muted">· 05</span></dt>
+<dd>A mail app that talks JMAP over HTTPS instead of IMAP. Twake Mail (Android, iOS), Sterna Mail and Ltt.rs (Android) all work against Stalwart through the tunnel at <code>mail.22112002.xyz</code>.</dd>
 </dl>
 </section>
 
