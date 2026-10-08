@@ -1,0 +1,18 @@
+{
+  "name": "mail-inbound-bridge",
+  "main": "src/index.ts",
+  "workers_dev": false,
+  "compatibility_date": "2026-10-01",
+  "vpc_networks": [
+    {
+      "binding": "VPC",
+      "tunnel_id": "0cf125dc-378c-4af2-83e3-d58df0fbed3f"
+    }
+  ],
+  "vars": {
+    "SMTP_ADDRESS": "127.0.0.1:25"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
