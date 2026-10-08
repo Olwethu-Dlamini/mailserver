@@ -1,0 +1,132 @@
+/* Shared stylesheet for the mail server guide series.
+   Dark by default, light when the OS asks for it. Inline SVG infographics
+   reuse these variables so they stay legible in both. */
+:root{
+  --bg:#0f1419; --bg2:#161c24; --bg3:#1d242e; --panel:#141a21;
+  --text:#d7dee6; --muted:#9aa7b4; --line:#2a333f;
+  --accent:#5db0ff; --accent2:#7ee787; --warn:#ffb454; --danger:#ff7b72; --sec:#bc8cff;
+  --code-bg:#0b0f14; --code-text:#e6edf3; --inline-code:#ffd9a0;
+  --svg-box:#1a222c; --svg-box2:#232d39; --svg-stroke:#4a5665; --svg-text:#e6edf3; --svg-muted:#9aa7b4;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#fbfcfd; --bg2:#f1f4f7; --bg3:#e6ebf0; --panel:#f5f7fa;
+    --text:#1b2430; --muted:#5a6675; --line:#d5dce4;
+    --accent:#0b6bcb; --accent2:#1a7f37; --warn:#b35c00; --danger:#c0392b; --sec:#7a3fd1;
+    --code-bg:#f4f6f8; --code-text:#1b2430; --inline-code:#8a4b00;
+    --svg-box:#ffffff; --svg-box2:#eef2f6; --svg-stroke:#9aa7b4; --svg-text:#1b2430; --svg-muted:#5a6675;
+  }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.65;font-size:16px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+strong{color:var(--text)}
+
+/* Top bar */
+.topbar{position:sticky;top:0;z-index:5;background:var(--bg2);border-bottom:1px solid var(--line)}
+.topbar .in{max-width:960px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.topbar .brand{font-weight:700;color:var(--text)}
+.topbar .brand span{color:var(--accent)}
+.topbar nav{display:flex;gap:4px;flex-wrap:wrap;margin-left:auto}
+.topbar nav a{color:var(--muted);padding:4px 9px;border-radius:6px;font-size:13px;font-variant-numeric:tabular-nums}
+.topbar nav a:hover{background:var(--bg3);color:var(--text);text-decoration:none}
+.topbar nav a.active{color:var(--accent);background:var(--bg3)}
+
+/* Layout */
+main{max-width:960px;margin:0 auto;padding:40px 20px 100px}
+header.hero{margin-bottom:36px;padding-bottom:24px;border-bottom:1px solid var(--line)}
+header.hero .kicker{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:8px}
+header.hero h1{font-size:34px;line-height:1.15;margin:0 0 12px}
+header.hero p.lead{font-size:18px;color:var(--muted);margin:0}
+header.hero .meta{margin-top:14px;font-size:13px;color:var(--muted)}
+section{margin:0 0 48px;scroll-margin-top:70px}
+h2{font-size:26px;margin:44px 0 8px;padding-top:16px;border-top:1px solid var(--line)}
+h2 .num{color:var(--accent);font-variant-numeric:tabular-nums}
+h3{font-size:20px;margin:28px 0 8px}
+h4{font-size:15px;margin:20px 0 6px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
+p{margin:10px 0}
+ul,ol{margin:10px 0;padding-left:24px}
+li{margin:6px 0}
+hr{border:none;border-top:1px solid var(--line);margin:32px 0}
+
+/* Code */
+pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:14px 0;font-size:13.5px}
+pre code{font-family:var(--mono);color:var(--code-text);white-space:pre}
+code{font-family:var(--mono);background:var(--bg3);padding:2px 6px;border-radius:5px;font-size:.9em;color:var(--inline-code)}
+pre code{background:none;padding:0;border-radius:0;font-size:inherit}
+
+/* Tables */
+table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14.5px}
+th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+th{background:var(--bg2);font-weight:600}
+td code{white-space:nowrap}
+
+/* Callouts */
+.callout{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--panel);border-radius:8px;padding:12px 16px;margin:16px 0}
+.callout .label{font-size:12px;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-bottom:4px;color:var(--accent)}
+.callout.warn{border-left-color:var(--warn)} .callout.warn .label{color:var(--warn)}
+.callout.danger{border-left-color:var(--danger)} .callout.danger .label{color:var(--danger)}
+.callout.tip{border-left-color:var(--accent2)} .callout.tip .label{color:var(--accent2)}
+.callout.road{border-left-color:var(--sec)} .callout.road .label{color:var(--sec)}
+.callout.verify{border-left-color:var(--warn);border-style:dashed} .callout.verify .label{color:var(--warn)}
+.callout p:first-of-type{margin-top:4px}
+
+/* Checkpoints in the build pages */
+.checkpoint{border:1px solid var(--accent2);background:var(--panel);border-radius:10px;padding:14px 18px;margin:20px 0}
+.checkpoint .label{color:var(--accent2);font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.08em}
+.checkpoint ul{margin:6px 0 0}
+
+/* Infographics */
+figure{margin:24px 0;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+figure svg{width:100%;height:auto;display:block;font-family:var(--sans)}
+figure svg text{fill:var(--svg-text);font-size:13px}
+figure svg text.muted{fill:var(--svg-muted);font-size:12px}
+figure svg text.mono{font-family:var(--mono);font-size:12px}
+figure svg text.title{font-size:15px;font-weight:700}
+figure svg .box{fill:var(--svg-box);stroke:var(--svg-stroke);stroke-width:1.2;rx:8}
+figure svg .box2{fill:var(--svg-box2);stroke:var(--svg-stroke);stroke-width:1.2;rx:8}
+figure svg .edge{stroke:var(--svg-stroke);stroke-width:1.6;fill:none}
+figure svg .edge.ok{stroke:var(--accent2)}
+figure svg .edge.bad{stroke:var(--danger);stroke-dasharray:6 5}
+figure svg .edge.http{stroke:var(--accent)}
+figure svg .edge.ts{stroke:var(--sec)}
+figure svg .wall{fill:var(--danger);opacity:.18;stroke:var(--danger);stroke-width:1.5}
+figure svg .pill{fill:var(--bg3);stroke:var(--svg-stroke);stroke-width:1;rx:11}
+figure svg .accent{fill:var(--accent)} figure svg .good{fill:var(--accent2)} figure svg .bad{fill:var(--danger)} figure svg .warnc{fill:var(--warn)} figure svg .secc{fill:var(--sec)}
+figure svg text.accent{fill:var(--accent)} figure svg text.good{fill:var(--accent2)} figure svg text.bad{fill:var(--danger)} figure svg text.warnc{fill:var(--warn)} figure svg text.secc{fill:var(--sec)}
+figcaption{margin-top:10px;font-size:13.5px;color:var(--muted)}
+
+/* Series cards on the index */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:14px;margin:20px 0}
+.card{display:block;border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel);color:var(--text)}
+.card:hover{border-color:var(--accent);text-decoration:none}
+.card .n{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.08em}
+.card h3{margin:4px 0 6px;font-size:17px}
+.card p{margin:0;color:var(--muted);font-size:14px}
+.card.plan{border-style:dashed}
+
+/* Prev / next */
+.pager{display:flex;justify-content:space-between;gap:12px;margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:14px}
+.pager a{padding:8px 12px;border:1px solid var(--line);border-radius:8px}
+.pager a:hover{border-color:var(--accent);text-decoration:none}
+
+/* Glossary */
+dl.gloss dt{font-weight:700;margin-top:14px}
+dl.gloss dd{margin:2px 0 0 0;color:var(--muted)}
+
+footer{max-width:960px;margin:0 auto;padding:0 20px 40px;color:var(--muted);font-size:13px}
+
+@media (max-width:640px){
+  header.hero h1{font-size:27px}
+  main{padding:28px 16px 80px}
+  pre{font-size:12.5px}
+}
+@media print{
+  .topbar,.pager{display:none}
+  body{background:#fff;color:#000}
+  figure{break-inside:avoid}
+}

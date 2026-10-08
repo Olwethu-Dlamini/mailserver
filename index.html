@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Running My Own Mail Server From Behind CGNAT</title>
+<meta name="description" content="A guide series on building a real mail server for 22112002.xyz on a homelab VM that has no public IP: the theory, the tools, and the build.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Guide series</div>
+  <h1>Running My Own Mail Server From Behind CGNAT</h1>
+  <p class="lead">The homelab already serves websites through a Cloudflare Tunnel. This series is about the next thing I wanted: a real <code>@22112002.xyz</code> mailbox, hosted on the same VM, with no public IP of my own.</p>
+  <div class="meta">Same rules as the <a href="https://olwethu-dlamini.github.io/Homelab/">Homelab guides</a>: wrong turns stay in, every "why not X" gets answered, and I prefer a command that produces a fact over a change that produces a hope.</div>
+</header>
+
+<section id="shape">
+<h2>The shape of the thing</h2>
+<p>Email is the one service where "just put it behind the tunnel" does not work, and the first page explains why. The short version: web traffic is <em>pulled</em> by a browser over HTTP, which Cloudflare Tunnel is built for. Mail is <em>pushed</em> by other mail servers over raw TCP on port 25, which no tunnel I can get for free will accept. So the design has two halves:</p>
+<ul>
+  <li><strong>At home, on <code>srv1</code>:</strong> the actual mail server (Stalwart), the mailboxes, the spam filter, and the webmail (Roundcube) behind Caddy and the existing tunnel.</li>
+  <li><strong>On a small rented VPS:</strong> nothing but a front door. It owns the public IP that the rest of the internet talks to, and it forwards every mail connection over Tailscale to <code>srv1</code>.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 960 430" role="img" aria-label="Architecture: internet reaches a rented VPS on ports 25, 465 and 993, which forwards over Tailscale to Stalwart on srv1 at home. Web browsers reach Roundcube through Cloudflare Tunnel and Caddy on the same VM.">
+  <!-- zones -->
+  <rect x="20" y="20" width="270" height="390" class="box2"/>
+  <text x="35" y="45" class="title">The public internet</text>
+  <rect x="330" y="20" width="250" height="390" class="box2"/>
+  <text x="345" y="45" class="title">Rented VPS</text>
+  <text x="345" y="63" class="muted">real public IP, PTR record</text>
+  <rect x="620" y="20" width="320" height="390" class="box2"/>
+  <text x="635" y="45" class="title">Home, behind CGNAT</text>
+  <text x="635" y="63" class="muted">srv1 on Proxmox, no public IP</text>
+
+  <!-- internet actors -->
+  <rect x="40" y="90" width="230" height="56" class="box"/>
+  <text x="55" y="113">Other mail servers</text>
+  <text x="55" y="131" class="muted">Gmail, Outlook, anyone sending to me</text>
+  <rect x="40" y="170" width="230" height="56" class="box"/>
+  <text x="55" y="193">My phone / Thunderbird</text>
+  <text x="55" y="211" class="muted">IMAP and submission from anywhere</text>
+  <rect x="40" y="300" width="230" height="56" class="box"/>
+  <text x="55" y="323">A browser</text>
+  <text x="55" y="341" class="muted">webmail.22112002.xyz</text>
+
+  <!-- vps components -->
+  <rect x="350" y="90" width="210" height="76" class="box"/>
+  <text x="365" y="113">HAProxy</text>
+  <text x="365" y="131" class="mono">:25  :465  :993</text>
+  <text x="365" y="149" class="muted">TCP pass-through + PROXY v2</text>
+  <rect x="350" y="200" width="210" height="60" class="box"/>
+  <text x="365" y="223">Postfix (relay only)</text>
+  <text x="365" y="241" class="muted">outbound mail leaves from here</text>
+  <rect x="350" y="300" width="210" height="56" class="box"/>
+  <text x="365" y="323">Cloudflare edge</text>
+  <text x="365" y="341" class="muted">(not on the VPS, shown for the path)</text>
+
+  <!-- home components -->
+  <rect x="640" y="90" width="280" height="90" class="box"/>
+  <text x="655" y="113">Stalwart</text>
+  <text x="655" y="131" class="muted">SMTP + IMAP + JMAP, spam filter,</text>
+  <text x="655" y="147" class="muted">mailboxes, DKIM, ACME certs</text>
+  <text x="655" y="167" class="mono">tailscale ip :25 :465 :993</text>
+  <rect x="640" y="210" width="280" height="56" class="box"/>
+  <text x="655" y="233">Tailscale (tailscale0)</text>
+  <text x="655" y="251" class="muted">the private wire to the VPS</text>
+  <rect x="640" y="300" width="130" height="56" class="box"/>
+  <text x="655" y="323">cloudflared</text>
+  <text x="655" y="341" class="muted">tunnel</text>
+  <rect x="790" y="300" width="130" height="56" class="box"/>
+  <text x="805" y="323">Caddy :80</text>
+  <text x="805" y="341" class="muted">Roundcube</text>
+
+  <!-- edges -->
+  <path d="M270 118 H350" class="edge ok" marker-end="url(#a)"/>
+  <text x="283" y="110" class="muted">SMTP 25</text>
+  <path d="M270 198 H350 V150" class="edge ok" marker-end="url(#a)"/>
+  <text x="283" y="190" class="muted">465 / 993</text>
+  <path d="M560 128 H640" class="edge ts" marker-end="url(#a)"/>
+  <text x="565" y="120" class="muted secc">over Tailscale</text>
+  <path d="M640 238 H560" class="edge ts" marker-end="url(#a)"/>
+  <text x="565" y="258" class="muted secc">outbound, to the relay</text>
+  <path d="M350 230 H300 V118" class="edge ok"/>
+  <path d="M270 328 H350" class="edge http" marker-end="url(#a)"/>
+  <text x="283" y="320" class="muted accent">HTTPS</text>
+  <path d="M560 328 H640" class="edge http" marker-end="url(#a)"/>
+  <text x="565" y="320" class="muted accent">tunnel</text>
+  <path d="M770 328 H790" class="edge http" marker-end="url(#a)"/>
+  <path d="M855 300 V180" class="edge" marker-end="url(#a)"/>
+  <text x="862" y="245" class="muted">IMAP on</text>
+  <text x="862" y="261" class="muted">loopback</text>
+
+  <text x="35" y="395" class="muted">Green: raw TCP mail traffic. Purple: inside the Tailscale mesh. Blue: ordinary HTTPS, the only thing the Cloudflare Tunnel carries.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The whole build on one page. Everything to the right of the VPS already exists except Stalwart and Roundcube. The VPS is the only new machine, and the only part that costs money.</figcaption>
+</figure>
+</section>
+
+<section id="series">
+<h2>The series</h2>
+<p>Pages 01 to 06 are the theory and the tool choices. Pages 07 and 08 are the build, written as a plan first and then corrected with what actually happened once I had done it. Page 09 is how to find out what is broken.</p>
+<div class="cards">
+  <a class="card" href="01-the-problem.html"><div class="n">01</div><h3>Why a tunnel can't carry mail</h3><p>The HTTP-shaped hole in the plan, CGNAT one more time, and what "pushed, not pulled" means for a protocol.</p></a>
+  <a class="card" href="02-how-email-works.html"><div class="n">02</div><h3>How email actually works</h3><p>The life of one message: submission, MX lookup, the SMTP conversation, delivery, and reading it back over IMAP or JMAP.</p></a>
+  <a class="card" href="03-dns-and-trust.html"><div class="n">03</div><h3>DNS and trust</h3><p>MX, PTR, SPF, DKIM, DMARC, MTA-STS and DANE: what each record proves, and why Gmail junks mail without them.</p></a>
+  <a class="card" href="04-stalwart.html"><div class="n">04</div><h3>Stalwart, and the stacks I didn't pick</h3><p>One Rust binary instead of five daemons. How it stores config, how it gets certificates with no open ports, and why not Postfix, Mailcow or docker-mailserver.</p></a>
+  <a class="card" href="05-the-front-door.html"><div class="n">05</div><h3>The front door: a relay VPS over Tailscale</h3><p>HAProxy with the PROXY protocol inbound, Postfix outbound, and the four alternatives that turned out not to exist or not to work.</p></a>
+  <a class="card" href="06-roundcube.html"><div class="n">06</div><h3>Roundcube behind the tunnel</h3><p>Webmail on the PHP and MariaDB already on srv1, served by Caddy, published the same way as every other site.</p></a>
+  <a class="card plan" href="07-build-home.html"><div class="n">07 · build</div><h3>Build part 1: everything at home</h3><p>Install Stalwart, add the domain, get certificates, create accounts, add Roundcube. Test it all over Tailscale before spending anything.</p></a>
+  <a class="card plan" href="08-build-front-door.html"><div class="n">08 · build</div><h3>Build part 2: the front door</h3><p>Rent the VPS, open port 25, set PTR, HAProxy, Postfix relay, point DNS at it, and send the first real message to Gmail.</p></a>
+  <a class="card" href="09-testing.html"><div class="n">09</div><h3>Testing and troubleshooting</h3><p>One command per layer, in the order that finds the fault fastest. Plus the external checkers worth trusting.</p></a>
+  <a class="card" href="glossary.html"><div class="n">Glossary</div><h3>Every term in one place</h3><p>For explaining this to someone else.</p></a>
+</div>
+</section>
+
+<section id="context">
+<h2>Where this picks up from</h2>
+<p>If you have not read the Homelab series, the relevant facts are: there is a Proxmox host (<code>pve</code>, 16 GB RAM) at home behind a CGNAT connection. On it runs a Debian 13 VM called <code>srv1</code> with 2 vCPUs and about 4 GB of RAM. <code>srv1</code> runs Caddy on port 80, PHP-FPM 8.4, MariaDB, and <code>cloudflared</code>, which holds an outbound tunnel to Cloudflare so that <code>22112002.xyz</code> and <code>lms.22112002.xyz</code> are reachable from the internet. Tailscale connects <code>pve</code>, <code>srv1</code> and my laptop. None of that changes in this series.</p>
+</section>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
