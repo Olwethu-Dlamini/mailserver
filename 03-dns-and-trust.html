@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · DNS and Trust: What a Receiving Server Checks</title>
+<meta name="description" content="MX, PTR, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, DANE and autoconfig: what each DNS record proves about a sender, in the order a receiving server checks them.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a class="active" href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 03 · The theory</div>
+  <h1>DNS and Trust: What a Receiving Server Checks</h1>
+  <p class="lead">Part 02 ended on an uncomfortable fact: SMTP will let anyone type any <code>From:</code> address. Everything that makes email trustworthy today was bolted on afterwards, and almost all of it lives in DNS. This part walks the checks a receiving server runs on my mail, in the order it runs them, so the DNS records in Part 08 are not a ritual.</p>
+  <div class="meta">Reading time about 20 minutes. Longest theory part; the build pages lean on it heavily.</div>
+</header>
+
+<section id="why-dns">
+<h2><span class="num">1.</span> Why trust lives in DNS</h2>
+<p>When Gmail's server receives a connection claiming to carry mail from <code>22112002.xyz</code>, it has two facts it cannot fake: the <strong>IP address</strong> that connected, and the <strong>bytes</strong> of the message. Everything else in the conversation is text the sender typed. The question is how Gmail can turn those two facts into "yes, the owner of <code>22112002.xyz</code> really sent this".</p>
+<p>The answer is that <em>only the owner of a domain can publish records under it</em>. So each authentication scheme has the domain owner publish a statement in DNS ("these IPs may send for me", "here is my public key", "here is what to do if the checks fail"), and the receiver reads that statement and compares it to the two facts it has. DNS becomes the place where my domain speaks for itself.</p>
+<p>The order below is roughly the order a receiving MTA performs the checks, from cheapest to most expensive, and it matters: a sender that fails the early checks is often refused before the message body is even sent.</p>
+
+<figure>
+<svg viewBox="0 0 960 560" role="img" aria-label="A vertical flow of checks a receiving mail server runs on an incoming connection: reverse DNS and forward confirmation, DNS blocklists, SPF against the envelope sender, DKIM signature verification, DMARC alignment and policy, then content and spam scoring. Each check has a pass branch continuing downward and a fail branch to the right leading to reject, defer, or add score.">
+  <rect x="20" y="20" width="400" height="520" class="box2"/>
+  <text x="35" y="45" class="title">The receiving server, as the connection arrives</text>
+  <rect x="470" y="20" width="470" height="520" class="box2"/>
+  <text x="485" y="45" class="title">If the check fails</text>
+
+  <rect x="40" y="65" width="360" height="52" class="box"/>
+  <text x="55" y="86">1. Who is connecting?</text>
+  <text x="55" y="104" class="mono">PTR for the IP → name → A back to the same IP?</text>
+  <path d="M400 91 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="70" width="430" height="42" class="box"/>
+  <text x="503" y="88" class="bad">No or mismatched reverse DNS</text>
+  <text x="503" y="104" class="muted">Many large receivers refuse at this point, before any mail.</text>
+
+  <path d="M220 117 V140" class="edge ok" marker-end="url(#a)"/>
+  <rect x="40" y="140" width="360" height="52" class="box"/>
+  <text x="55" y="161">2. Is this IP on a blocklist?</text>
+  <text x="55" y="179" class="mono">Spamhaus ZEN and friends, one DNS query each</text>
+  <path d="M400 166 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="145" width="430" height="42" class="box"/>
+  <text x="503" y="163" class="bad">Listed (PBL = residential, SBL = spam source)</text>
+  <text x="503" y="179" class="muted">Reject, or heavy spam score. Why my home IP can never send directly.</text>
+
+  <path d="M220 192 V215" class="edge ok" marker-end="url(#a)"/>
+  <rect x="40" y="215" width="360" height="52" class="box"/>
+  <text x="55" y="236">3. SPF: may this IP send for the envelope domain?</text>
+  <text x="55" y="254" class="mono">TXT at MAIL FROM domain, compare to connecting IP</text>
+  <path d="M400 241 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="220" width="430" height="42" class="box"/>
+  <text x="503" y="238" class="bad">-all: fail · ~all: softfail</text>
+  <text x="503" y="254" class="muted">Noted for DMARC. Alone, usually a score, not a rejection.</text>
+
+  <path d="M220 267 V290" class="edge ok" marker-end="url(#a)"/>
+  <rect x="40" y="290" width="360" height="52" class="box"/>
+  <text x="55" y="311">4. DKIM: is the signature valid?</text>
+  <text x="55" y="329" class="mono">key from selector._domainkey.&lt;d=&gt;, verify headers+body</text>
+  <path d="M400 316 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="295" width="430" height="42" class="box"/>
+  <text x="503" y="313" class="bad">Missing, broken, or key not found</text>
+  <text x="503" y="329" class="muted">Noted for DMARC. A modified body breaks it on purpose.</text>
+
+  <path d="M220 342 V365" class="edge ok" marker-end="url(#a)"/>
+  <rect x="40" y="365" width="360" height="52" class="box"/>
+  <text x="55" y="386">5. DMARC: does a passing check ALIGN with From:?</text>
+  <text x="55" y="404" class="mono">_dmarc TXT at the From: domain; apply p=</text>
+  <path d="M400 391 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="370" width="430" height="42" class="box"/>
+  <text x="503" y="388" class="bad">Neither SPF nor DKIM aligned</text>
+  <text x="503" y="404" class="muted">p=none: deliver, report · quarantine: spam folder · reject: refuse</text>
+
+  <path d="M220 417 V440" class="edge ok" marker-end="url(#a)"/>
+  <rect x="40" y="440" width="360" height="52" class="box"/>
+  <text x="55" y="461">6. Content: Bayes, rules, URLs, reputation history</text>
+  <text x="55" y="479" class="mono">a score, with 1–5 above adding or removing points</text>
+  <path d="M400 466 H485" class="edge bad" marker-end="url(#a)"/>
+  <rect x="490" y="445" width="430" height="42" class="box"/>
+  <text x="503" y="463" class="warnc">Over threshold</text>
+  <text x="503" y="479" class="muted">Spam folder. Everything above feeds this number.</text>
+
+  <path d="M220 492 V515" class="edge ok" marker-end="url(#a)"/>
+  <rect x="150" y="515" width="140" height="22" class="pill"/>
+  <text x="178" y="531" class="good">Inbox</text>
+
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>Checks 1 and 2 are about the IP and happen before a single byte of the message. 3 to 5 are about the domain and need DNS records I publish. 6 is the spam filter proper, which uses all of the above as input.</figcaption>
+</figure>
+</section>
+
+<section id="forward">
+<h2><span class="num">2.</span> Forward DNS: MX, A, and the Cloudflare trap</h2>
+<p>Before any of the trust checks, there is the plumbing. For mail to <em>reach</em> me, a sender resolves my MX record to a hostname and that hostname to an IP:</p>
+<pre><code>22112002.xyz.          MX    10 mail.22112002.xyz.
+mail.22112002.xyz.     A     &lt;the VPS's public IPv4&gt;</code></pre>
+<p>Two rules from the specifications: the MX target must be a hostname, not an IP literal, and that hostname must have an A/AAAA record directly, not be a CNAME to something else. Both are enforced loosely by real servers, but breaking them is a source of "works with some senders, not others" bugs I would rather never debug.</p>
+<div class="callout warn"><div class="label">The Cloudflare trap</div>
+<p>On Cloudflare, every A record has an orange-cloud/grey-cloud toggle. Orange means Cloudflare's HTTP proxy sits in front and the record resolves to <em>Cloudflare's</em> IPs. That is what makes the websites work. For <code>mail.22112002.xyz</code> it would be fatal: a sender would resolve the name to a Cloudflare IP, connect to port 25 there, and get nothing, because Cloudflare's proxy only speaks HTTP. The mail host's A record must be <strong>grey cloud, "DNS only"</strong>. The Cloudflare dashboard actually warns when an MX points at a proxied name, which is how I first learned this.</p></div>
+<p>The web side needs nothing new. <code>22112002.xyz</code> keeps its tunnel CNAME, the websites keep working, and <code>webmail.22112002.xyz</code> is just one more tunnel hostname. Only the one name that mail servers connect to has to be a plain, honest A record pointing at a machine that answers on 25.</p>
+</section>
+
+<section id="ptr">
+<h2><span class="num">3.</span> Reverse DNS: PTR and forward confirmation</h2>
+<p>Forward DNS turns a name into an IP. Reverse DNS turns an IP into a name, through a PTR record in a special zone under <code>in-addr.arpa</code>. The receiving server looks up the PTR of the connecting IP and then, crucially, resolves <em>that name</em> forward again and checks it comes back to the same IP. This round trip is called <strong>forward-confirmed reverse DNS</strong> (FCrDNS), and large receivers treat failing it as a strong spam signal or a reason to refuse outright.</p>
+<pre><code>&lt;VPS IP&gt;             PTR   mail.22112002.xyz.      ← set at the VPS provider
+mail.22112002.xyz.    A     &lt;VPS IP&gt;               ← set at Cloudflare; must match</code></pre>
+<p>The thing that took me a while to accept: <strong>I cannot set a PTR record in Cloudflare</strong> or anywhere else I control, because PTR records live in the zone owned by whoever owns the IP block. For a VPS that is the hosting provider, which exposes a "reverse DNS" field in its control panel. For my home connection it is my ISP, who will not. This single fact is a complete, independent reason the outbound path has to leave from the VPS, even if nothing in Part 01 applied.</p>
+<p>It also means the <em>same</em> hostname should be used in three places: the PTR, the A record, and the name the relay announces in its <code>EHLO</code> greeting. When all three agree, check 1 in the diagram passes cleanly.</p>
+</section>
+
+<section id="spf">
+<h2><span class="num">4.</span> SPF: which IPs may send for my domain</h2>
+<p><strong>Sender Policy Framework</strong> is the oldest and simplest of the three authentication schemes. The domain owner publishes a TXT record listing the IPs allowed to send mail whose <em>envelope sender</em> (the <code>MAIL FROM</code> from Part 02) is at that domain. The receiver takes the connecting IP and asks: is it on the list?</p>
+<pre><code>22112002.xyz.    TXT   "v=spf1 mx -all"</code></pre>
+<p>Reading that: version 1; any IP that my MX records resolve to is allowed (<code>mx</code>); nobody else is, and treat them as a hard fail (<code>-all</code>). Because my MX is <code>mail.22112002.xyz</code> and that resolves to the VPS, the VPS is authorised with no IP written into the record, so if the VPS ever changes I update one A record and SPF follows. Other mechanisms I read about and did not need:</p>
+<ul>
+  <li><code>ip4:203.0.113.5</code> or <code>ip4:203.0.113.0/24</code>: an explicit address or range.</li>
+  <li><code>include:_spf.google.com</code>: "also allow whatever that other domain's SPF allows". Needed when a third party (a newsletter service, a transactional relay) sends as you. Each <code>include</code> costs DNS lookups and there is a hard limit of ten per evaluation; exceeding it is a permanent error.</li>
+  <li><code>a</code>: the domain's own A record. Wrong for me, because that is a Cloudflare proxy IP.</li>
+  <li><code>~all</code> instead of <code>-all</code>: "softfail", meaning "probably not legitimate, but do not refuse on SPF alone". Common advice is to start here. With DMARC in place (below), <code>-all</code> is fine and clearer about intent.</li>
+</ul>
+<p><strong>What SPF checks and what it misses.</strong> It binds the connecting IP to the envelope sender domain. It says nothing about the <code>From:</code> header a human sees, so on its own it does not stop a forger who uses their own envelope domain and my address in <code>From:</code>. And it <strong>breaks under forwarding</strong>: if my friend has their Gmail forward to another account, that final receiver sees Gmail's IP sending a message with my envelope domain, which my record does not allow. That weakness is the entire reason DKIM exists.</p>
+</section>
+
+<section id="dkim">
+<h2><span class="num">5.</span> DKIM: a signature that travels with the message</h2>
+<p><strong>DomainKeys Identified Mail</strong> takes a different approach: instead of vouching for an IP, the sending server <em>signs</em> the message with a private key, and publishes the matching public key in DNS. Any receiver, at any later hop, can fetch the key and verify the signature. Forwarding does not break it, because the signature is inside the message.</p>
+<p>The signing server adds a header like this (shortened):</p>
+<pre><code>DKIM-Signature: v=1; a=rsa-sha256; d=22112002.xyz; s=202610;
+   h=from:to:subject:date:message-id; bh=&lt;hash of the body&gt;;
+   b=&lt;signature over the listed headers and bh&gt;</code></pre>
+<p>Two fields matter for the receiver: <code>d=</code>, the signing domain, and <code>s=</code>, the <strong>selector</strong>. It builds the name <code>&lt;selector&gt;._domainkey.&lt;domain&gt;</code>, fetches the TXT record there, and gets the public key:</p>
+<pre><code>202610._domainkey.22112002.xyz.   TXT   "v=DKIM1; k=rsa; p=MIIBIjANBgkq..."</code></pre>
+<p>The selector exists so a domain can have several keys at once. That is what makes <strong>rotation</strong> possible: publish a new key under a new selector, start signing with it, and after old messages in transit have all been verified, delete the old selector's record. Rotating is good hygiene (a leaked key is otherwise valid forever) and tedious by hand, which is why I was glad to find that Stalwart manages DKIM key rotation itself and, with automatic DNS management, publishes the new selector's record to Cloudflare for me. Part 04 covers that; the point here is that the mechanism in DNS is just "one TXT record per selector".</p>
+<p><strong>What DKIM checks and what it misses.</strong> It binds the message content to the <code>d=</code> domain: whoever holds that domain's private key produced these exact headers and body. It says nothing about which IP sent it, and, like SPF, nothing about the <code>From:</code> header, because <code>d=</code> can be any domain the signer controls. A spammer can DKIM-sign with their own domain and still put mine in <code>From:</code>. Closing that last gap is DMARC's job.</p>
+</section>
+
+<section id="dmarc">
+<h2><span class="num">6.</span> DMARC: tying both to the From: header</h2>
+<p><strong>DMARC</strong> does three things that neither SPF nor DKIM does alone. It looks at the domain in the <code>From:</code> header, the one a human sees. It requires that <em>at least one</em> of SPF or DKIM passed <strong>and</strong> that the domain it passed for is the same as (or a subdomain of) that <code>From:</code> domain. This is called <strong>alignment</strong>. And it tells the receiver what to do when neither aligns, plus where to send reports about it.</p>
+<pre><code>_dmarc.22112002.xyz.   TXT   "v=DMARC1; p=none; rua=mailto:dmarc@22112002.xyz; adkim=s; aspf=s"</code></pre>
+<ul>
+  <li><code>p=</code> is the policy for mail that fails: <code>none</code> (deliver normally, just report), <code>quarantine</code> (spam folder), <code>reject</code> (refuse at SMTP time).</li>
+  <li><code>rua=</code> is where receivers send <em>aggregate reports</em>: daily XML files summarising, per sending IP, how many messages they saw claiming my domain and whether SPF and DKIM aligned. They are unreadable raw and perfectly readable through any free DMARC report viewer. Stalwart also parses and displays them under Reports.</li>
+  <li><code>adkim=s</code> / <code>aspf=s</code> ask for <em>strict</em> alignment, exact domain match, instead of the <em>relaxed</em> default that accepts subdomains. For a single-domain setup, strict costs nothing.</li>
+</ul>
+
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Three boxes. SPF binds the connecting IP address to the envelope MAIL FROM domain. DKIM binds the message bytes, via a signature, to the d= domain in the signature. DMARC takes the From: header domain that a human sees and requires that it align with either the SPF-checked domain or the DKIM-checked domain, then applies a policy.">
+  <rect x="20" y="20" width="290" height="190" class="box2"/>
+  <text x="35" y="45" class="title accent">SPF</text>
+  <rect x="35" y="60" width="260" height="40" class="box"/>
+  <text x="48" y="78">Connecting IP</text><text x="48" y="94" class="muted">a fact: cannot be faked</text>
+  <path d="M165 100 V130" class="edge ok" marker-end="url(#a)"/>
+  <text x="172" y="120" class="muted">is it listed by…</text>
+  <rect x="35" y="130" width="260" height="40" class="box"/>
+  <text x="48" y="148">Envelope MAIL FROM domain</text><text x="48" y="164" class="mono">TXT  v=spf1 mx -all</text>
+  <text x="35" y="198" class="muted">Breaks on forwarding. Ignores From:.</text>
+
+  <rect x="335" y="20" width="290" height="190" class="box2"/>
+  <text x="350" y="45" class="title secc">DKIM</text>
+  <rect x="350" y="60" width="260" height="40" class="box"/>
+  <text x="363" y="78">Message headers + body</text><text x="363" y="94" class="muted">a fact: the bytes received</text>
+  <path d="M480 100 V130" class="edge ts" marker-end="url(#a)"/>
+  <text x="487" y="120" class="muted">signed by key at…</text>
+  <rect x="350" y="130" width="260" height="40" class="box"/>
+  <text x="363" y="148">d= domain, selector s=</text><text x="363" y="164" class="mono">s._domainkey.d  TXT  p=…</text>
+  <text x="350" y="198" class="muted">Survives forwarding. Ignores From:.</text>
+
+  <rect x="650" y="20" width="290" height="190" class="box2"/>
+  <text x="665" y="45" class="title good">DMARC</text>
+  <rect x="665" y="60" width="260" height="40" class="box"/>
+  <text x="678" y="78">From: header domain</text><text x="678" y="94" class="muted">what the human sees</text>
+  <path d="M795 100 V130" class="edge ok" marker-end="url(#a)"/>
+  <text x="802" y="120" class="muted">must ALIGN with…</text>
+  <rect x="665" y="130" width="260" height="40" class="box"/>
+  <text x="678" y="148">SPF's domain  OR  DKIM's d=</text><text x="678" y="164" class="mono">_dmarc  TXT  p=  rua=</text>
+  <text x="665" y="198" class="muted">If neither: apply p=. Always: report.</text>
+
+  <path d="M165 210 V250 H795 V210" class="edge" marker-end="url(#a)"/>
+  <path d="M480 210 V250" class="edge"/>
+  <rect x="300" y="262" width="360" height="50" class="box"/>
+  <text x="315" y="282">Alignment is the whole point of DMARC:</text>
+  <text x="315" y="300" class="muted">a pass that is for a different domain than From: counts for nothing.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>SPF and DKIM each prove something about a domain the human never sees. DMARC is the rule that says one of those proven domains has to be the one in <code>From:</code>.</figcaption>
+</figure>
+
+<h3>The rollout that does not lock me out of my own mail</h3>
+<p>Every guide I read agrees on the sequence, and it is the one I am following in Part 08:</p>
+<ol>
+  <li>Publish with <code>p=none</code> and a <code>rua=</code> address. Nothing changes for receivers; I start getting reports.</li>
+  <li>Send mail normally for a couple of weeks and read the reports. Every legitimate source of mail from my domain (the server itself, the LMS sending password resets, anything else) should show as aligned. Anything that is not, I fix: usually a service that needs an <code>include:</code> in SPF or a DKIM key of its own.</li>
+  <li>Move to <code>p=quarantine</code>. Forged mail now lands in spam folders.</li>
+  <li>Move to <code>p=reject</code>. Forged mail is refused at the door. This is also the setting that lets receivers trust my domain the most.</li>
+</ol>
+<div class="callout tip"><div class="label">Why not reject from day one</div>
+<p>Because the LMS on <code>lms.22112002.xyz</code> sends mail too, through PHP, and I have not yet checked what envelope and <code>From:</code> it uses. If I jump to <code>reject</code> before routing it through Stalwart, its password-reset emails vanish and I will not know until a user tells me. The reports exist to find exactly this.</p></div>
+</section>
+
+<section id="transport">
+<h2><span class="num">7.</span> Transport security: MTA-STS, TLS-RPT and DANE</h2>
+<p>The checks so far are about <em>who</em> sent a message. These are about whether the connection carrying it was encrypted. SMTP's <code>STARTTLS</code> is opportunistic: if a middlebox strips the <code>STARTTLS</code> line from the server's greeting, the sender quietly continues in plain text. Two schemes let a domain owner say "do not accept that".</p>
+<p><strong>MTA-STS</strong> (Mail Transfer Agent Strict Transport Security) works over HTTPS, so it needs no DNSSEC. The domain publishes a tiny TXT record saying "I have a policy, version <em>id</em>", and serves the policy itself as a text file at a fixed HTTPS URL:</p>
+<pre><code>_mta-sts.22112002.xyz.   TXT   "v=STSv1; id=20261008"
+
+https://mta-sts.22112002.xyz/.well-known/mta-sts.txt :
+version: STSv1
+mode: testing
+mx: mail.22112002.xyz
+max_age: 86400</code></pre>
+<p>A sending server that supports MTA-STS fetches that file, caches it for <code>max_age</code> seconds, and from then on refuses to deliver to me unless the connection is TLS with a valid certificate for one of the listed MX hosts. <code>mode: testing</code> means "report failures but still deliver"; <code>enforce</code> means refuse. Same pattern as DMARC: test first.</p>
+<p>The nice consequence for my setup is that <code>mta-sts.22112002.xyz</code> is an ordinary HTTPS site, so it goes through the Cloudflare Tunnel like everything else, with Caddy proxying to Stalwart's HTTP listener, which generates the policy file from its domain settings. The one piece of mail infrastructure that <em>is</em> HTTP gets to use the tunnel.</p>
+<p><strong>TLS-RPT</strong> is the reporting companion: a TXT record at <code>_smtp._tls</code> naming an address where senders email a daily summary of TLS failures they had connecting to me.</p>
+<pre><code>_smtp._tls.22112002.xyz.   TXT   "v=TLSRPTv1; rua=mailto:tlsrpt@22112002.xyz"</code></pre>
+<p><strong>DANE</strong> solves the same problem through DNS instead of HTTPS: a TLSA record at <code>_25._tcp.mail.22112002.xyz</code> publishes a hash of the certificate (or its issuer), and senders verify against it. It is the stricter design, but it only works if the DNS answers are themselves signed with <strong>DNSSEC</strong>, and the certificate hash has to be updated every time Let's Encrypt renews. Cloudflare supports DNSSEC with one click, and Stalwart can generate the TLSA records, so this is possible later. I am marking it optional: MTA-STS gets most of the benefit with none of the renewal coupling.</p>
+</section>
+
+<section id="autoconfig">
+<h2><span class="num">8.</span> Records for my own clients: autoconfig and autodiscover</h2>
+<p>None of this is about trust, but it lives in the same zone. When someone types <code>me@22112002.xyz</code> into Thunderbird or an iPhone, the client tries to find the server settings on its own. Thunderbird fetches <code>https://autoconfig.22112002.xyz/mail/config-v1.1.xml</code>; Outlook fetches <code>https://autodiscover.22112002.xyz/autodiscover/autodiscover.xml</code>; others look up SRV records:</p>
+<pre><code>_imaps._tcp.22112002.xyz.        SRV   0 1 993 mail.22112002.xyz.
+_submissions._tcp.22112002.xyz.  SRV   0 1 465 mail.22112002.xyz.
+autoconfig.22112002.xyz.         CNAME mail.22112002.xyz.    (or via the tunnel)
+autodiscover.22112002.xyz.       CNAME mail.22112002.xyz.    (or via the tunnel)</code></pre>
+<p>Stalwart serves the XML files from its HTTP listener, and like MTA-STS they can go through the tunnel. The payoff is small but real: adding the account on a phone becomes "type address and password".</p>
+</section>
+
+<section id="dnsbl">
+<h2><span class="num">9.</span> Blocklists: the check I cannot influence with records</h2>
+<p>Check 2 in the diagram is the <strong>DNS-based blocklist</strong> lookup. The receiver reverses the connecting IP's octets, appends a list's zone (for example <code>zen.spamhaus.org</code>), and does an A lookup. An answer means "listed", and the specific answer encodes why. Spamhaus ZEN bundles several lists; the ones that matter for me:</p>
+<ul>
+  <li><strong>PBL</strong>, the policy list from Part 01: ranges that ISPs have declared are end-user space. My home IP is on it by design and nothing I publish changes that. The VPS's IP must not be.</li>
+  <li><strong>SBL</strong> and <strong>XBL</strong>: known spam sources and compromised machines. A fresh VPS IP can inherit a listing from its previous tenant, which is one reason to check the IP against ZEN <em>before</em> building anything on it. Part 08 does this first.</li>
+</ul>
+<p>Stalwart runs these same lookups on <em>inbound</em> connections as part of its spam filter, which is why Part 05 goes to some trouble to make sure Stalwart sees the real connecting IP through the relay rather than the relay's own.</p>
+</section>
+
+<section id="summary">
+<h2><span class="num">10.</span> Every record, and who publishes it in this build</h2>
+<table>
+<thead><tr><th>Record</th><th>Name</th><th>What it proves or does</th><th>Created by</th></tr></thead>
+<tbody>
+<tr><td>A</td><td><code>mail.22112002.xyz</code></td><td>Where mail servers and clients connect. Grey cloud.</td><td><strong>Me, by hand</strong> in Cloudflare</td></tr>
+<tr><td>PTR</td><td>the VPS IP</td><td>The IP claims to be <code>mail.22112002.xyz</code>; FCrDNS</td><td><strong>Me, by hand</strong> at the VPS provider</td></tr>
+<tr><td>MX</td><td><code>22112002.xyz</code></td><td>Which host accepts my mail</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>TXT (SPF)</td><td><code>22112002.xyz</code></td><td>Which IPs may send with my envelope domain</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>TXT (DKIM)</td><td><code>&lt;selector&gt;._domainkey</code></td><td>Public key for the signature on my outbound mail</td><td>Stalwart, automatic DNS, rotated by Stalwart</td></tr>
+<tr><td>TXT (DMARC)</td><td><code>_dmarc</code></td><td>Alignment policy and report address</td><td>Stalwart, automatic DNS; policy level changed by me over time</td></tr>
+<tr><td>TXT (MTA-STS)</td><td><code>_mta-sts</code></td><td>"I have a TLS policy, this version"</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>HTTPS file</td><td><code>mta-sts.22112002.xyz</code></td><td>The policy itself</td><td>Stalwart serves it; published through the tunnel</td></tr>
+<tr><td>TXT (TLS-RPT)</td><td><code>_smtp._tls</code></td><td>Where to send TLS failure reports</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>SRV, CNAME</td><td><code>_imaps._tcp</code>, <code>autoconfig</code>, <code>autodiscover</code></td><td>Client auto-setup</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>CAA</td><td><code>22112002.xyz</code></td><td>Which certificate authorities may issue for the domain</td><td>Stalwart, automatic DNS</td></tr>
+<tr><td>TLSA (DANE)</td><td><code>_25._tcp.mail</code></td><td>Certificate pin; needs DNSSEC</td><td>Optional, later</td></tr>
+</tbody>
+</table>
+<p>The split is the useful thing to notice. The two records that identify <em>a machine</em> (A and PTR) are mine to set, once. Everything that describes <em>the domain's mail policy</em> is generated by Stalwart from its own configuration and pushed to Cloudflare through an API token. Part 04 explains how that works and Part 07 sets it up.</p>
+<div class="callout verify"><div class="label">Verify during the build</div>
+<p>The list of record types Stalwart's automatic DNS management publishes (DKIM, SPF, MX, DMARC, SRV, MTA-STS, TLS-RPT, CAA, autoconfig, autodiscover, and optionally TLSA) comes from the v0.16 documentation. Whether the A record for the mail host is also something it can manage, and the exact default values it generates for SPF and DMARC, I will confirm against the domain's generated zone file in the web admin and correct this table if needed.</p></div>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Grey cloud / orange cloud</dt><dd>Cloudflare's per-record switch. Orange proxies HTTP through Cloudflare's IPs; grey publishes the real IP. Mail hosts must be grey.</dd>
+<dt>PTR / FCrDNS</dt><dd>Reverse DNS for an IP, and the check that the resulting name resolves forward to the same IP. Set by the IP's owner, which is why it must be the VPS.</dd>
+<dt>SPF</dt><dd>A TXT record listing which IPs may send mail whose envelope sender is at the domain. Checked against the connecting IP. Breaks under forwarding.</dd>
+<dt>DKIM / selector</dt><dd>A signature over the message, verified with a public key published at <code>selector._domainkey.domain</code>. Selectors allow several keys and so rotation.</dd>
+<dt>DMARC / alignment</dt><dd>A policy at <code>_dmarc.domain</code> requiring that SPF or DKIM passed <em>for the domain in the From: header</em>, and saying what to do otherwise.</dd>
+<dt>p=none / quarantine / reject</dt><dd>DMARC's three answers to "what if it fails": deliver and report, spam-folder it, refuse it.</dd>
+<dt>Aggregate report (rua)</dt><dd>Daily XML sent by receivers summarising which IPs sent as your domain and whether they aligned. The feedback loop for rolling out DMARC.</dd>
+<dt>MTA-STS / TLS-RPT</dt><dd>An HTTPS-published policy that tells senders to require TLS and a valid certificate when delivering to you, and the record naming where they report failures.</dd>
+<dt>DANE / TLSA</dt><dd>The DNS-based equivalent: a certificate hash in DNS, trusted because DNSSEC signs it.</dd>
+<dt>DNSBL</dt><dd>A blocklist queried over DNS by reversing the IP. Spamhaus ZEN is the usual one; its PBL component lists residential ranges.</dd>
+<dt>Autoconfig / autodiscover</dt><dd>Files and SRV records that let a mail client find server settings from just an email address.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="02-how-email-works.html">← 02 · How email actually works</a>
+  <a href="04-stalwart.html">04 · Stalwart, and the stacks I didn't pick →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
