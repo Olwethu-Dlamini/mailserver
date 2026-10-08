@@ -113,7 +113,7 @@
 
 <section id="series">
 <h2>The series</h2>
-<p>Pages 01 to 06 are the theory and the tool choices. Pages 07 and 08 are the build, written as a plan first and then corrected with what actually happened once I had done it. Page 09 is how to find out what is broken.</p>
+<p>Pages 01 to 06 are the theory and the tool choices. Pages 07 and 08 are the build. Part 07 was written as a plan on the morning of 8 October 2026 and rewritten the same afternoon from the build log; part 08 is still the plan. Page 09 is how to find out what is broken.</p>
 <div class="cards">
   <a class="card" href="01-the-problem.html"><div class="n">01</div><h3>Why a tunnel can't carry mail</h3><p>The HTTP-shaped hole in the plan, CGNAT one more time, and what "pushed, not pulled" means for a protocol.</p></a>
   <a class="card" href="02-how-email-works.html"><div class="n">02</div><h3>How email actually works</h3><p>The life of one message: submission, MX lookup, the SMTP conversation, delivery, and reading it back over IMAP or JMAP.</p></a>
@@ -121,7 +121,7 @@
   <a class="card" href="04-stalwart.html"><div class="n">04</div><h3>Stalwart, and the stacks I didn't pick</h3><p>One Rust binary instead of five daemons. How it stores config, how it gets certificates with no open ports, and why not Postfix, Mailcow or docker-mailserver.</p></a>
   <a class="card" href="05-the-front-door.html"><div class="n">05</div><h3>The front door: a relay VPS over Tailscale</h3><p>HAProxy with the PROXY protocol inbound, Postfix outbound, and the four alternatives that turned out not to exist or not to work.</p></a>
   <a class="card" href="06-roundcube.html"><div class="n">06</div><h3>Roundcube behind the tunnel</h3><p>Webmail on the PHP and MariaDB already on srv1, served by Caddy, published the same way as every other site.</p></a>
-  <a class="card plan" href="07-build-home.html"><div class="n">07 · build</div><h3>Build part 1: everything at home</h3><p>Install Stalwart, add the domain, get certificates, create accounts, add Roundcube. Test it all over Tailscale before spending anything.</p></a>
+  <a class="card" href="07-build-home.html"><div class="n">07 · build · done</div><h3>Build part 1: everything at home</h3><p>Built on 8 October 2026: Stalwart, the domain, a wildcard certificate with no open ports, Roundcube and accounts, proven over Tailscale before spending anything. With the traps the plan missed.</p></a>
   <a class="card plan" href="08-build-front-door.html"><div class="n">08 · build</div><h3>Build part 2: the front door</h3><p>Rent the VPS, open port 25, set PTR, HAProxy, Postfix relay, point DNS at it, and send the first real message to Gmail.</p></a>
   <a class="card" href="09-testing.html"><div class="n">09</div><h3>Testing and troubleshooting</h3><p>One command per layer, in the order that finds the fault fastest. Plus the external checkers worth trusting.</p></a>
   <a class="card" href="glossary.html"><div class="n">Glossary</div><h3>Every term in one place</h3><p>For explaining this to someone else.</p></a>

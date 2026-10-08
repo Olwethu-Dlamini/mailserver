@@ -16,7 +16,7 @@ Open `index.html` in a browser, or start with the first page.
 | 04 | [Stalwart, and the stacks I didn't pick](04-stalwart.html) | How Stalwart works; why not Postfix+Dovecot, Mailcow, docker-mailserver |
 | 05 | [The front door](05-the-front-door.html) | A relay VPS, HAProxy + PROXY protocol, Postfix outbound, over Tailscale |
 | 06 | [Roundcube behind the tunnel](06-roundcube.html) | Webmail on the existing PHP/MariaDB/Caddy stack |
-| 07 | [Build part 1: everything at home](07-build-home.html) | Stalwart, domain, certificates, accounts, Roundcube, tested over Tailscale |
+| 07 | [Build part 1: everything at home](07-build-home.html) | Built 8 October 2026: Stalwart, domain, wildcard certificate via DNS-01, Roundcube, accounts, tested over Tailscale. Raw notes in `notes/build-log-2026-10-08.md` |
 | 08 | [Build part 2: the front door](08-build-front-door.html) | The VPS, port 25, PTR, HAProxy, Postfix, DNS, first message to Gmail |
 | 09 | [Testing and troubleshooting](09-testing.html) | One command per layer |
 | — | [Glossary](glossary.html) | Every term |

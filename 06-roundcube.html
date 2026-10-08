@@ -51,7 +51,7 @@
 <section id="path">
 <h2><span class="num">3.</span> The request path, end to end</h2>
 <figure>
-<svg viewBox="0 0 960 420" role="img" aria-label="A browser reaches webmail.22112002.xyz through Cloudflare and the tunnel to Caddy on srv1, which hands the request to PHP-FPM running Roundcube. Roundcube talks to Stalwart over loopback on ports 143 and 587. A dotted line shows that resolving mail.22112002.xyz publicly would route out to the VPS and back, which is not the path we want.">
+<svg viewBox="0 0 960 420" role="img" aria-label="A browser reaches webmail.22112002.xyz through Cloudflare and the tunnel to Caddy on srv1, which hands the request to PHP-FPM running Roundcube. Roundcube talks to Stalwart over loopback on ports 993 and 465, the same listeners the front door will use. A dotted line shows that resolving mail.22112002.xyz publicly would route out to the VPS and back, which is not the path we want.">
   <rect x="20" y="20" width="300" height="380" class="box2"/>
   <text x="35" y="45" class="title">Internet</text>
   <rect x="360" y="20" width="580" height="380" class="box2"/>
@@ -84,7 +84,7 @@
   <rect x="380" y="290" width="540" height="90" class="box"/>
   <text x="395" y="313">Stalwart</text>
   <text x="395" y="331" class="muted">mailboxes, authentication, DKIM, spam filter</text>
-  <text x="395" y="355" class="mono">127.0.0.1:143 imap STARTTLS      127.0.0.1:587 submission STARTTLS</text>
+  <text x="395" y="355" class="mono">127.0.0.1:993 imaps · 127.0.0.1:465 submissions (the default listeners)</text>
   <text x="395" y="372" class="mono">100.72.72.58:25 / :465 / :993 (for the front door only, part 05)</text>
 
   <path d="M170 136 V170" class="edge http" marker-end="url(#a)"/>
@@ -166,8 +166,8 @@ sudo mariadb roundcubemail &lt; /var/www/webmail.22112002.xyz/SQL/mysql.initial.
 $config['db_dsnw'] = 'mysql://roundcube:a_real_password@localhost/roundcubemail';
 
 // Stalwart, on the same machine, over loopback
-$config['imap_host'] = 'tls://127.0.0.1:143';   // STARTTLS on 143; or 'ssl://127.0.0.1:993'
-$config['smtp_host'] = 'tls://127.0.0.1:587';   // submission with STARTTLS
+$config['imap_host'] = 'ssl://127.0.0.1:993';   // implicit TLS, the listener Stalwart already runs
+$config['smtp_host'] = 'ssl://127.0.0.1:465';   // submissions, implicit TLS, same story
 $config['smtp_user'] = '%u';                    // reuse the IMAP login for sending
 $config['smtp_pass'] = '%p';
 
@@ -184,11 +184,12 @@ $config['des_key'] = 'exactly-24-random-chars!';   // generate: openssl rand -ba
 $config['product_name'] = 'Mail · 22112002.xyz';
 $config['plugins'] = ['archive', 'zipdownload', 'managesieve'];
 $config['enable_installer'] = false;</code></pre>
+<p>One correction from the build: the plan had Roundcube on its own loopback listeners, STARTTLS on 143 and 587. Those were never created. Stalwart's defaults already listen on 993 and 465 on every interface, and (part 07, step 8) trusting the VPS for PROXY protocol on those ports in part 08 does not affect connections from 127.0.0.1, so Roundcube simply uses the same two ports with implicit TLS. Fewer listeners, nothing lost.</p>
 <h3>The trap: which name is the certificate for?</h3>
 <p>Stalwart's certificate, obtained in part 07 through ACME with a DNS challenge, is for <code>mail.22112002.xyz</code>. Roundcube connects to <code>127.0.0.1</code>. PHP's TLS layer compares the name it connected to against the name in the certificate, sees that <code>127.0.0.1</code> is not <code>mail.22112002.xyz</code>, and refuses. There are two honest fixes and one dishonest one.</p>
 <ul>
   <li><strong>Set <code>peer_name</code></strong> in the connection options, as above. Connect to the IP, verify against the real name. This is the one I'm using.</li>
-  <li><strong>Connect to the name, but override where it resolves</strong>. Add <code>127.0.0.1 mail.22112002.xyz</code> to <code>/etc/hosts</code> on <code>srv1</code>, then set <code>imap_host</code> to <code>tls://mail.22112002.xyz:143</code>. Equivalent, slightly more magic, but it also makes <code>openssl s_client -connect mail.22112002.xyz:993</code> on the box test the local server, which is handy.</li>
+  <li><strong>Connect to the name, but override where it resolves</strong>. Add <code>127.0.0.1 mail.22112002.xyz</code> to <code>/etc/hosts</code> on <code>srv1</code>, then set <code>imap_host</code> to <code>ssl://mail.22112002.xyz:993</code>. Equivalent, slightly more magic, but it also makes <code>openssl s_client -connect mail.22112002.xyz:993</code> on the box test the local server, which is handy.</li>
   <li><strong>Turn verification off</strong> with <code>verify_peer =&gt; false</code>. It would work. It is also the kind of shortcut that quietly stays forever. Not doing it.</li>
 </ul>
 <p>Why not simply let <code>mail.22112002.xyz</code> resolve normally? Because in public DNS that name points at the <strong>VPS</strong>. From <code>srv1</code>, a connection to it would go out of the house, across the internet to the front door, through HAProxy, back down Tailscale, and into the very same Stalwart process sitting on the same VM. It would work. It would also be absurd, and it would break the moment the VPS was down even though both halves of webmail were fine. Loopback is the right wire.</p>
