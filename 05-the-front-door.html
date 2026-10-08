@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 · The Front Door: A Relay VPS Over Tailscale</title>
+<meta name="description" content="The design for the one rented machine in this build: HAProxy passing inbound mail connections to Stalwart at home with the PROXY protocol, and a relay-only Postfix sending outbound mail from the VPS's IP, all over Tailscale.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a class="active" href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 05 · The tools</div>
+  <h1>The Front Door: A Relay VPS Over Tailscale</h1>
+  <p class="lead">Part 01 ended with a constraint: some machine with a real public IP has to accept port 25 for me, and outbound mail has to leave from an IP whose reputation is mine. This part designs that machine to do as little as possible.</p>
+  <div class="meta">Design only. The commands to build it are in part 08. Tailscale addresses shown are mine; <code>&lt;vps-tailscale-ip&gt;</code> and <code>&lt;vps-public-ip&gt;</code> are placeholders until the box exists.</div>
+</header>
+
+<section id="constraint">
+<h2><span class="num">1.</span> The job description</h2>
+<p>The rented box has exactly two jobs, and I want it to have no others:</p>
+<ol>
+  <li><strong>Inbound:</strong> accept TCP connections from the internet on ports 25, 465 and 993, and hand each one, byte for byte, to Stalwart on <code>srv1</code> over Tailscale, while telling Stalwart who the real client was.</li>
+  <li><strong>Outbound:</strong> accept messages from Stalwart over Tailscale and deliver them to the rest of the internet, so that Gmail sees the VPS's IP, its PTR record and its HELO name, all of which I control.</li>
+</ol>
+<p>It stores no mail. It holds no mailbox passwords. It does not terminate TLS for IMAP or submission, so it never sees a user's password or message in the clear. It does not run a spam filter. If it is wiped tomorrow, I rent another one, re-run part 08, and change one A record. That is the test I kept applying to each design decision: <em>could this box be replaced in an hour with nothing lost?</em></p>
+</section>
+
+<section id="requirements">
+<h2><span class="num">2.</span> Choosing a provider: two questions, then price</h2>
+<p>The requirements list is short, and the first two items disqualify most of the big names.</p>
+<table>
+<thead><tr><th>Requirement</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td><strong>Port 25 open, inbound and outbound</strong></td><td>Without inbound 25 nothing can deliver to me. Without outbound 25 the relay cannot deliver to anyone. Many providers block one or both on new accounts to stop spammers.</td></tr>
+<tr><td><strong>PTR (reverse DNS) editable</strong></td><td>Receivers check that the connecting IP's PTR names a host that resolves back to the same IP. If I cannot set it to <code>mail.22112002.xyz</code>, I fail that check on every message.</td></tr>
+<tr><td>A dedicated IPv4 address</td><td>Plenty of mail servers still have no IPv6. A shared or NAT'd IPv4 is useless here for the same reasons as CGNAT at home.</td></tr>
+<tr><td>Cheap</td><td>HAProxy and a relay-only Postfix need almost nothing. The smallest plan is fine.</td></tr>
+<tr><td>Any region</td><td>Mail is store-and-forward. A few hundred milliseconds between Eswatini and Europe is invisible.</td></tr>
+</tbody>
+</table>
+<p>What I found when I checked the providers people usually name, as of writing. Policies change, so ask the two questions before paying:</p>
+<ul>
+  <li><strong>Hetzner:</strong> blocks port 25 on new accounts. You open a support ticket after the first invoice is paid and explain what you are doing; they generally unblock it. PTR is editable in the console. About €4 to €5 a month for the smallest box.</li>
+  <li><strong>Contabo, OVH:</strong> port 25 open by default, PTR editable. Similar price bracket.</li>
+  <li><strong>DigitalOcean:</strong> blocks port 25 for new accounts and does not offer an unblock path. Not usable for this.</li>
+  <li><strong>Oracle Cloud, AWS, GCP:</strong> port 25 blocked, with unblock processes that are slow, conditional or absent. The free tiers are tempting and a poor fit.</li>
+  <li><strong>South African providers:</strong> several exist and would be closer. I have not verified their port 25 and PTR policies; the two questions above are the ones to ask their support before paying.</li>
+</ul>
+<div class="callout tip"><div class="label">Ask before you pay</div>
+<p>"Is TCP port 25 open inbound and outbound on your VPS plans, and can I set the reverse DNS of my IP myself?" If either answer is no or vague, move on. Everything else about the provider is secondary.</p></div>
+</section>
+
+<section id="inbound">
+<h2><span class="num">3.</span> Inbound: HAProxy, TCP mode, PROXY protocol</h2>
+<p>HAProxy is a load balancer and proxy that can work at two levels. In HTTP mode it understands requests, like Caddy. In <strong>TCP mode</strong> it understands nothing about the protocol: it accepts a connection on one side, opens a connection on the other, and copies bytes between them. That is exactly what I want. SMTP, IMAP and their TLS handshakes pass through untouched. Stalwart at home still holds the certificates, still terminates TLS, still sees the user's password. The VPS sees ciphertext.</p>
+<p>The one thing plain byte-copying loses is the client's address. From Stalwart's point of view every connection would arrive from the VPS's Tailscale IP, which would break SPF evaluation, DNSBL lookups, greylisting, rate limiting and auto-ban all at once. HAProxy fixes this with the <strong>PROXY protocol</strong>: before copying any bytes, it sends a short header to the backend saying "original client <code>209.85.220.41</code>, port 51234, destined for your port 25". Stalwart reads that header, as long as it comes from an address in its trusted list, and then behaves exactly as if Gmail had connected directly.</p>
+
+<figure>
+<svg viewBox="0 0 960 330" role="img" aria-label="Inbound path: a Gmail server at 209.85.220.41 connects to the VPS public IP on port 25. HAProxy on the VPS forwards over Tailscale to Stalwart on srv1 at 100.72.72.58 port 25, prefixing the stream with a PROXY v2 header carrying the client IP 209.85.220.41. Stalwart trusts the VPS Tailscale IP and so evaluates SPF and DNSBL against 209.85.220.41.">
+  <rect x="20" y="60" width="200" height="70" class="box"/>
+  <text x="35" y="85">Gmail's server</text>
+  <text x="35" y="104" class="mono">209.85.220.41</text>
+  <text x="35" y="122" class="muted">wants to deliver to me</text>
+
+  <path d="M220 95 H300" class="edge ok" marker-end="url(#a)"/>
+  <text x="228" y="86" class="muted">TCP :25</text>
+
+  <rect x="300" y="30" width="260" height="130" class="box2"/>
+  <text x="315" y="52" class="title">VPS</text>
+  <text x="315" y="69" class="mono">&lt;vps-public-ip&gt;</text>
+  <rect x="315" y="80" width="230" height="66" class="box"/>
+  <text x="328" y="102">HAProxy, mode tcp</text>
+  <text x="328" y="120" class="mono">bind :25 :465 :993</text>
+  <text x="328" y="138" class="muted">copies bytes, terminates nothing</text>
+
+  <path d="M560 112 H660" class="edge ts" marker-end="url(#a)"/>
+  <text x="568" y="100" class="muted secc">Tailscale</text>
+
+  <!-- proxy header -->
+  <rect x="540" y="185" width="300" height="70" class="pill"/>
+  <text x="552" y="206" class="mono secc">PROXY TCP4 209.85.220.41 &lt;vps&gt; 51234 25</text>
+  <text x="552" y="226" class="muted">sent first, before Gmail's bytes</text>
+  <text x="552" y="244" class="muted">(v2 is binary; shown as v1 for reading)</text>
+  <path d="M610 185 V120" class="edge ts"/>
+
+  <rect x="660" y="30" width="280" height="130" class="box2"/>
+  <text x="675" y="52" class="title">srv1 at home</text>
+  <text x="675" y="69" class="mono">100.72.72.58</text>
+  <rect x="675" y="80" width="250" height="66" class="box"/>
+  <text x="688" y="102">Stalwart listener :25</text>
+  <text x="688" y="120" class="mono">overrideProxyTrustedNetworks</text>
+  <text x="688" y="138" class="mono">= [&lt;vps-tailscale-ip&gt;]</text>
+
+  <rect x="660" y="275" width="280" height="40" class="box"/>
+  <text x="675" y="300" class="good">SPF, DNSBL, rate limits see 209.85.220.41</text>
+  <path d="M800 160 V275" class="edge ok" marker-end="url(#a)"/>
+
+  <text x="20" y="200" class="muted">TLS on 465 and 993 is between the client and Stalwart.</text>
+  <text x="20" y="218" class="muted">The VPS forwards the encrypted bytes and cannot read them.</text>
+  <text x="20" y="250" class="muted">Without the header, Stalwart would judge every</text>
+  <text x="20" y="268" class="muted bad">sender as &lt;vps-tailscale-ip&gt; and every IP check would be wrong.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The PROXY header is the whole reason to use HAProxy rather than a kernel-level port forward. It carries the one fact byte-copying would otherwise destroy.</figcaption>
+</figure>
+
+<p>Stalwart accepts PROXY protocol versions 1 and 2. HAProxy's <code>send-proxy-v2</code> sends the binary version 2, which also carries TLS information. On the Stalwart side the trust is set per listener with <code>overrideProxyTrustedNetworks</code> on the <code>NetworkListener</code> (or globally with <code>proxyTrustedNetworks</code> under <code>Settings › Network › General</code>). I use the per-listener form so that only the listeners bound on the Tailscale address expect a header, and the loopback listeners Roundcube uses do not. A listener cannot decode both a PROXY header and <code>X-Forwarded-For</code> on the same connection, which does not matter here because nothing HTTP goes through this path.</p>
+
+<h3>The HAProxy configuration</h3>
+<p>This is the whole file. Three frontends on the public address, three backends to the same Tailscale address at home, PROXY protocol on every backend. Port 587 is commented out: 465 with implicit TLS is what modern clients prefer, and one fewer open port is one fewer thing to explain.</p>
+<pre><code># /etc/haproxy/haproxy.cfg on the VPS
+global
+    log /dev/log local0
+    maxconn 2000
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    option dontlognull
+    timeout connect 10s
+    timeout client  5m
+    timeout server  5m
+
+# ---- inbound mail from other servers ----
+frontend ft_smtp
+    bind &lt;vps-public-ip&gt;:25
+    default_backend bk_smtp
+
+backend bk_smtp
+    server srv1 100.72.72.58:25 send-proxy-v2 check
+
+# ---- my own clients: submission over implicit TLS ----
+frontend ft_smtps
+    bind &lt;vps-public-ip&gt;:465
+    default_backend bk_smtps
+
+backend bk_smtps
+    server srv1 100.72.72.58:465 send-proxy-v2 check
+
+# ---- my own clients: IMAP over implicit TLS ----
+frontend ft_imaps
+    bind &lt;vps-public-ip&gt;:993
+    default_backend bk_imaps
+
+backend bk_imaps
+    server srv1 100.72.72.58:993 send-proxy-v2 check
+
+# Optional: STARTTLS submission for older clients.
+# frontend ft_submission
+#     bind &lt;vps-public-ip&gt;:587
+#     default_backend bk_submission
+# backend bk_submission
+#     server srv1 100.72.72.58:587 send-proxy-v2 check</code></pre>
+<p>Notes on the choices:</p>
+<ul>
+  <li><strong>Five-minute client and server timeouts.</strong> SMTP sessions can legitimately idle while a server does DNS lookups and spam checks. The default one-minute timeouts in distro configs cut off slow but honest senders.</li>
+  <li><strong><code>check</code></strong> makes HAProxy probe <code>srv1</code> and log when it is unreachable, which is how I will find out that the Tailscale link or Stalwart is down before anyone tells me.</li>
+  <li><strong>Binding to the public IP explicitly</strong>, not <code>*</code>, so HAProxy never listens on the Tailscale interface where Postfix lives.</li>
+  <li><strong>Why HAProxy and not Caddy</strong>, given Caddy runs the rest of the homelab: Caddy's layer-4 proxying is a third-party plugin and a custom build. HAProxy in TCP mode is a one-package install with the PROXY protocol as a native feature, because HAProxy invented it.</li>
+</ul>
+</section>
+
+<section id="outbound">
+<h2><span class="num">4.</span> Outbound: a relay-only Postfix on the Tailscale interface</h2>
+<p>Inbound is byte-copying. Outbound is not, because Stalwart at home needs to hand a <em>message</em> to something that will do the MX lookup and the delivery from the VPS's address. The smallest tool for "accept mail from one trusted host and deliver it onward" is Postfix with almost everything turned off. It listens only on the VPS's Tailscale address, accepts mail only from <code>srv1</code>'s Tailscale address, and relays it to the world.</p>
+
+<figure>
+<svg viewBox="0 0 960 360" role="img" aria-label="Outbound path: Stalwart on srv1 signs the message with DKIM, then hands it over Tailscale to Postfix on the VPS's Tailscale IP port 25. Postfix looks up Gmail's MX and delivers from the VPS public IP with HELO mail.22112002.xyz. Gmail checks three things that line up: PTR of the VPS IP is mail.22112002.xyz, A of mail.22112002.xyz is the VPS IP, and SPF v=spf1 mx -all authorises it.">
+  <rect x="20" y="40" width="260" height="110" class="box2"/>
+  <text x="35" y="62" class="title">srv1 at home</text>
+  <rect x="35" y="75" width="230" height="62" class="box"/>
+  <text x="48" y="97">Stalwart</text>
+  <text x="48" y="115" class="good">1. signs with DKIM</text>
+  <text x="48" y="131" class="muted">2. MtaRoute "relay" → VPS</text>
+
+  <path d="M280 105 H360" class="edge ts" marker-end="url(#a)"/>
+  <text x="285" y="96" class="muted secc">Tailscale, plain SMTP</text>
+  <text x="285" y="128" class="muted">already WireGuard-encrypted</text>
+
+  <rect x="360" y="40" width="260" height="110" class="box2"/>
+  <text x="375" y="62" class="title">VPS</text>
+  <rect x="375" y="75" width="230" height="62" class="box"/>
+  <text x="388" y="97">Postfix, relay only</text>
+  <text x="388" y="115" class="mono">inet_interfaces = &lt;vps-tailscale-ip&gt;</text>
+  <text x="388" y="131" class="mono">mynetworks = 100.72.72.58/32</text>
+
+  <path d="M620 105 H700" class="edge ok" marker-end="url(#a)"/>
+  <text x="625" y="96" class="muted">3. MX lookup,</text>
+  <text x="625" y="128" class="muted">TCP :25 from &lt;vps-public-ip&gt;</text>
+
+  <rect x="700" y="40" width="240" height="110" class="box"/>
+  <text x="715" y="62" class="title">Gmail's MX</text>
+  <text x="715" y="85" class="muted">sees connection from:</text>
+  <text x="715" y="103" class="mono">&lt;vps-public-ip&gt;</text>
+  <text x="715" y="121" class="muted">HELO mail.22112002.xyz</text>
+  <text x="715" y="139" class="muted">From: me@22112002.xyz</text>
+
+  <text x="20" y="195" class="title">Three records that must agree, all pointing at the same box</text>
+  <rect x="20" y="210" width="290" height="100" class="box"/>
+  <text x="35" y="232" class="accent">PTR</text>
+  <text x="35" y="252" class="mono">&lt;vps-public-ip&gt; → mail.22112002.xyz</text>
+  <text x="35" y="272" class="muted">set in the VPS provider's console.</text>
+  <text x="35" y="290" class="muted">"Does this IP admit who it is?"</text>
+  <rect x="335" y="210" width="290" height="100" class="box"/>
+  <text x="350" y="232" class="accent">A</text>
+  <text x="350" y="252" class="mono">mail.22112002.xyz → &lt;vps-public-ip&gt;</text>
+  <text x="350" y="272" class="muted">set in Cloudflare, DNS-only (grey cloud).</text>
+  <text x="350" y="290" class="muted">"Does the name point back?"</text>
+  <rect x="650" y="210" width="290" height="100" class="box"/>
+  <text x="665" y="232" class="accent">SPF on 22112002.xyz</text>
+  <text x="665" y="252" class="mono">v=spf1 mx -all</text>
+  <text x="665" y="272" class="muted">"mx" = whatever the MX record names,</text>
+  <text x="665" y="290" class="muted">which is mail.22112002.xyz, which is the VPS.</text>
+  <text x="20" y="340" class="good">DKIM was added at home, so the signature proves the message came from my server even though a different machine sent it.</text>
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--svg-stroke)"/></marker></defs>
+</svg>
+<figcaption>The relay changes which IP the world sees. DKIM, applied before the relay, is what still ties the message to my server.</figcaption>
+</figure>
+
+<h3>The Postfix configuration</h3>
+<p>These are the settings that matter in <code>/etc/postfix/main.cf</code>. Everything not listed stays at the Debian default.</p>
+<pre><code># Identity: must match the PTR record and the A record
+myhostname = mail.22112002.xyz
+smtp_helo_name = mail.22112002.xyz
+
+# Listen ONLY on the Tailscale address and loopback. Never on the public IP.
+inet_interfaces = &lt;vps-tailscale-ip&gt;, 127.0.0.1
+inet_protocols = ipv4
+
+# Who may relay through this box: loopback and srv1's Tailscale address. Nothing else.
+mynetworks = 127.0.0.0/8, 100.72.72.58/32
+smtpd_relay_restrictions = permit_mynetworks, reject_unauth_destination
+
+# This box delivers mail for NO domain of its own. Everything is relayed onward.
+mydestination =
+local_recipient_maps =
+relayhost =
+
+# Outbound TLS: use it when the other side offers it
+smtp_tls_security_level = may
+smtp_tls_loglevel = 1
+
+# Inbound from srv1 may be plain; it is inside the Tailscale tunnel
+smtpd_tls_security_level = none
+
+# Keep the queue honest if the VPS cannot reach a recipient for a while
+maximal_queue_lifetime = 3d
+bounce_queue_lifetime = 1d</code></pre>
+<ul>
+  <li><strong><code>mydestination</code> is empty</strong> so Postfix never thinks a message is "for this machine" and tries to deliver to a local Unix user. Every message goes out.</li>
+  <li><strong><code>relayhost</code> is empty</strong> because this Postfix <em>is</em> the last hop before the internet. It does its own MX lookups.</li>
+  <li><strong>Plaintext between Stalwart and Postfix</strong> is acceptable because that hop is entirely inside Tailscale, which is WireGuard. Adding TLS there would mean a certificate for a Tailscale-only name and gain nothing. If I ever move the relay off Tailscale, this line changes first.</li>
+  <li><strong>DKIM is signed at home.</strong> Postfix does not touch the body or the signed headers, so the signature survives. SPF passes because the connecting IP is the VPS and the SPF record says "whatever my MX points at", which is the VPS. DMARC then passes on both counts.</li>
+</ul>
+
+<div class="callout danger"><div class="label">This must never become an open relay</div>
+<p>An open relay is a mail server that will forward mail from anyone to anyone. Spammers scan for them constantly, and within hours of finding one they will push thousands of messages through it. The VPS's IP would be blacklisted everywhere, and my domain with it, before I noticed. Three settings prevent it and all three have to hold: <code>inet_interfaces</code> keeps Postfix off the public interface entirely, so nobody outside Tailscale can even connect; <code>mynetworks</code> lists only <code>srv1</code>; and <code>smtpd_relay_restrictions</code> rejects relaying from anything not in <code>mynetworks</code>. The test, from a machine that is <em>not</em> on my Tailscale network: <code>nc -vz &lt;vps-public-ip&gt; 25</code> must connect (that is HAProxy) but <code>openssl s_client -connect &lt;vps-public-ip&gt;:25 -starttls smtp</code> must show <strong>Stalwart's</strong> banner, not Postfix's, and an attempt to send to an outside address without logging in must be refused with a 5xx. Part 09 has the full procedure, and MXToolbox's open relay test is the external confirmation.</p></div>
+
+<h3>The Stalwart side</h3>
+<p>In <code>Settings › MTA › Outbound › Routes</code>, one route of variant <code>Relay</code>:</p>
+<pre><code>{
+  "@type": "Relay",
+  "name": "vps-relay",
+  "address": "&lt;vps-tailscale-ip&gt;",
+  "port": 25,
+  "protocol": "smtp",
+  "implicitTls": false,
+  "allowInvalidCerts": false,
+  "authSecret": {"@type": "None"}
+}</code></pre>
+<p>No authentication, because the only thing that can reach Postfix on that address is already <code>srv1</code>; Tailscale is the authentication. Then the outbound strategy has to select this route for every recipient that is not one of my own domains.</p>
+<div class="callout verify"><div class="label">Verify during the build</div>
+<p>The documentation describes the route being chosen by an expression on the <code>MtaOutboundStrategy</code> object, with examples that branch on recipient domain or authentication status. I have not seen the exact expression syntax for "any recipient not in a local domain → vps-relay". Part 08 records what the WebUI actually presents and what I typed.</p></div>
+</section>
+
+<section id="firewall">
+<h2><span class="num">5.</span> The VPS firewall</h2>
+<p>A rented box with a public IP gets scanned within minutes of booting. The rule set is short because the box does so little:</p>
+<table>
+<thead><tr><th>Port</th><th>From</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td>22/tcp</td><td>Tailscale only, ideally</td><td>SSH. Once Tailscale is up I connect via the Tailscale address and close 22 on the public side. Keep it public only until Tailscale is confirmed working.</td></tr>
+<tr><td>25/tcp</td><td>Anywhere</td><td>HAProxy, inbound mail from other servers</td></tr>
+<tr><td>465/tcp, 993/tcp</td><td>Anywhere</td><td>HAProxy, my own clients</td></tr>
+<tr><td>41641/udp</td><td>Anywhere</td><td>Tailscale's WireGuard port, so the VPS and <code>srv1</code> connect directly instead of via a relay</td></tr>
+<tr><td>Everything else</td><td>Dropped</td><td>Including Postfix, which is not on the public interface at all</td></tr>
+</tbody>
+</table>
+<p>Debian's <code>nftables</code> or <code>ufw</code> both do this in a few lines; part 08 has the file. The important check afterwards is from outside: an <code>nmap</code> or a port checker against the public IP should show exactly 25, 465, 993 and whatever SSH state I have chosen, and nothing on 587 or 143 unless I enable them.</p>
+</section>
+
+<section id="roads">
+<h2><span class="num">6.</span> Roads not taken</h2>
+<div class="callout road"><div class="label">Road not taken · nftables DNAT port forwarding</div>
+<p><strong>For it:</strong> no HAProxy process at all, just kernel rules that rewrite packets for port 25 to <code>srv1</code>'s Tailscale address. Simplest possible front door. <strong>Against it:</strong> for the reply packets to find their way back through the VPS, either <code>srv1</code> needs policy routing that sends its mail traffic back via the VPS, or the VPS has to masquerade, rewriting the source to its own address. Masquerading destroys the client IP, and unlike HAProxy there is no PROXY header to carry it, so SPF, DNSBL and rate limiting all break. Policy routing at home means touching <code>srv1</code>'s routing table, which the Cloudflare tunnel and Tailscale also depend on. HAProxy costs one package and keeps the kernel out of it.</p></div>
+<div class="callout road"><div class="label">Road not taken · a Tailscale exit node</div>
+<p><strong>For it:</strong> one command on each side and <code>srv1</code>'s outbound traffic would leave from the VPS's IP, no Postfix needed. <strong>Against it:</strong> an exit node routes <em>all</em> of <code>srv1</code>'s traffic through the VPS, including the Cloudflare tunnel, package updates and every website's outbound calls. The blast radius is wrong: a problem with the VPS would take the websites down. It also does nothing for inbound. The relay-only Postfix sends exactly one kind of traffic through the VPS and nothing else.</p></div>
+<div class="callout road"><div class="label">Road not taken · a full MX on the VPS forwarding home over LMTP</div>
+<p><strong>For it:</strong> this is the textbook "backup MX" or "edge MX" pattern, with Postfix or a second Stalwart on the VPS accepting mail, filtering it and forwarding to home. It works and is widely used. <strong>Against it:</strong> the spam filter and the queue now live in two places, half the configuration moves off <code>srv1</code>, and when Tailscale is down my mail queues on the VPS disk instead of being retried by the sender. The byte-copying design keeps the VPS stateless: if the link is down, HAProxy refuses the connection and the sending server retries later, which is what SMTP was built for.</p></div>
+<div class="callout road"><div class="label">Road not taken · plain WireGuard instead of Tailscale</div>
+<p><strong>For it:</strong> the VPS has a public IP, so hand-configured WireGuard is finally possible here where it was not at home, and it would remove a third party. <strong>Against it:</strong> <code>srv1</code> already runs Tailscale, MagicDNS gives me names, and NAT traversal from behind CGNAT to the VPS is handled for me. One more WireGuard config to maintain on a box I want to be replaceable in an hour is the wrong trade. If Tailscale ever becomes a problem this is the fallback, and the Postfix and HAProxy configs would only need the addresses changed.</p></div>
+<div class="callout road"><div class="label">Road not taken · Cloudflare Spectrum, ngrok and friends</div>
+<p>Covered in part 01: Spectrum is Enterprise-only, and any shared TCP tunnel service gives me an IP whose reverse DNS and reputation belong to someone else. The whole point of the VPS is that its IP is mine.</p></div>
+</section>
+
+<section id="summary">
+<h2><span class="num">7.</span> The design on one line each</h2>
+<ul>
+  <li><strong>Inbound:</strong> HAProxy in TCP mode on the public IP, ports 25/465/993, <code>send-proxy-v2</code> to Stalwart on <code>100.72.72.58</code>; Stalwart trusts the VPS's Tailscale IP and sees the real client.</li>
+  <li><strong>Outbound:</strong> Stalwart signs DKIM, routes to a <code>Relay</code> at the VPS's Tailscale IP; Postfix there, bound to Tailscale only, delivers to the world from the VPS's IP.</li>
+  <li><strong>DNS:</strong> <code>mail.22112002.xyz</code> A → VPS (grey cloud), MX → <code>mail.22112002.xyz</code>, PTR of the VPS → <code>mail.22112002.xyz</code>, SPF <code>v=spf1 mx -all</code>; everything else published by Stalwart.</li>
+  <li><strong>State on the VPS:</strong> none worth keeping. Replaceable in an hour.</li>
+</ul>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>TCP mode (HAProxy)</dt><dd>Layer-4 proxying: HAProxy copies bytes between two connections without understanding the protocol inside them. TLS passes through intact.</dd>
+<dt>PROXY protocol</dt><dd>A header HAProxy sends at the start of a forwarded connection carrying the original client's address and port, so the backend can act as if the client connected directly. Version 2 is binary and also carries TLS details.</dd>
+<dt>Smarthost / relay host</dt><dd>A mail server that accepts messages from a trusted source and delivers them onward. Here, the Postfix on the VPS.</dd>
+<dt>Open relay</dt><dd>A smarthost that trusts everyone. The fastest way to get an IP blacklisted. Prevented by <code>inet_interfaces</code>, <code>mynetworks</code> and <code>smtpd_relay_restrictions</code> together.</dd>
+<dt>HELO / EHLO name</dt><dd>The hostname a sending server announces at the start of an SMTP session. Receivers check that it resolves and matches the PTR record.</dd>
+<dt>PTR record</dt><dd>Reverse DNS: the name an IP claims. Set at the VPS provider, not in Cloudflare.</dd>
+<dt>Grey cloud</dt><dd>Cloudflare's "DNS only" setting for a record. Mail records must be grey; a proxied (orange) A record would point at Cloudflare's HTTP edge, which does not speak SMTP.</dd>
+<dt>Exit node</dt><dd>A Tailscale device that other devices route all their internet traffic through. Too broad for this job.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="04-stalwart.html">← 04 · Stalwart</a>
+  <a href="06-roundcube.html">06 · Roundcube behind the tunnel →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
