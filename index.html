@@ -109,7 +109,7 @@
 
 <section id="series">
 <h2>The series</h2>
-<p>Pages 01 to 06 are the theory and the tool choices. Pages 07 and 08 are the build, both written as plans on the morning of 8 October 2026 and both rewritten from the build log by the evening, after the VPS plan was dropped for the free design. Page 09 is how to find out what is broken.</p>
+<p>Pages 01 to 06 are the theory and the tool choices. Pages 07 and 08 are the build, both written as plans on the morning of 8 October 2026 and both rewritten from the build log by the evening, after the VPS plan was dropped for the free design. Page 09 is how to find out what is broken. Pages 10 and 11 were added on 11 October 2026, after three days of running it: what to fix next, and what the system is good for.</p>
 <div class="cards">
   <a class="card" href="01-the-problem.html"><div class="n">01</div><h3>Why a tunnel can't carry mail</h3><p>The HTTP-shaped hole in the plan, CGNAT one more time, and what "pushed, not pulled" means for a protocol.</p></a>
   <a class="card" href="02-how-email-works.html"><div class="n">02</div><h3>How email actually works</h3><p>The life of one message: submission, MX lookup, the SMTP conversation, delivery, and reading it back over IMAP or JMAP.</p></a>
@@ -120,6 +120,8 @@
   <a class="card" href="07-build-home.html"><div class="n">07 · build · done</div><h3>Build part 1: everything at home</h3><p>Built on 8 October 2026: Stalwart, the domain, a wildcard certificate with no open ports, Roundcube and accounts, proven over Tailscale before spending anything. With the traps the plan missed.</p></a>
   <a class="card" href="08-build-front-door.html"><div class="n">08 · build · done</div><h3>Build part 2: the free front door, as built</h3><p>The afternoon of 8 October 2026: JMAP through the tunnel, the Worker, Resend, the MX handover, the catch-all rule, and the first messages from and to Gmail, with the one step the admin pages don't mention.</p></a>
   <a class="card" href="09-testing.html"><div class="n">09</div><h3>Testing and troubleshooting</h3><p>One command per hop, from DNS through the Worker's log to Stalwart's, in the order that finds the fault fastest. Plus the faults met on the day and the external checkers worth trusting.</p></a>
+  <a class="card" href="10-improvements.html"><div class="n">10</div><h3>Improving the system as built</h3><p>What three days of logs showed: real mail filed as Junk, DMARC reports spending the Resend quota, backups that stay on the VM, and nothing that alerts when a hop breaks. Each with its evidence and a proposed fix.</p></a>
+  <a class="card" href="11-what-you-can-do.html"><div class="n">11</div><h3>What you can do with it</h3><p>An address per service, Sieve filters, homelab alerts, sending from apps through Stalwart or the Resend API, calendars and contacts, and mail-triggered automation in the Worker.</p></a>
   <a class="card" href="glossary.html"><div class="n">Glossary</div><h3>Every term in one place</h3><p>For explaining this to someone else.</p></a>
 </div>
 </section>
