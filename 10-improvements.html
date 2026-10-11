@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>10 · Improving the System as Built</title>
+<meta name="description" content="What three days of running the free design showed: real mail filed as Junk, DMARC reports spending the Resend quota, backups that never leave the VM, listeners wider than they need to be, and nothing that alerts when the inbound path breaks. Each with the fact behind it and the change I would make.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a class="active" href="10-improvements.html">10</a><a href="11-what-you-can-do.html">11</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 10 · After the build</div>
+  <h1>Improving the System as Built</h1>
+  <p class="lead">It works: mail arrives from Gmail through Cloudflare and the Worker, and leaves through Resend with DMARC passing at a strict receiver. Three days of logs say what to fix next. This page lists each problem, the evidence for it, and the change I would make, ordered by how much it matters.</p>
+  <div class="meta">Measured on 11 October 2026 from srv1 (Stalwart 0.16.25) and public DNS. The counts cover the Stalwart logs for 8 to 11 October. A change that has not been made yet is marked as a proposal.</div>
+</header>
+
+<section id="summary">
+<h2><span class="num">0.</span> The list</h2>
+<table>
+<thead><tr><th>#</th><th>Problem</th><th>Evidence</th><th>Effort</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Genuine mail is filed as Junk</td><td>5 of 6 "Possible spam" messages were legitimate, with DKIM and DMARC passing</td><td>An hour</td></tr>
+<tr><td>2</td><td>Mail is lost while the tunnel or srv1 is down</td><td>The Worker throws on any temporary failure; there is no second destination</td><td>A few lines in the Worker</td></tr>
+<tr><td>3</td><td>Outgoing DMARC reports spend the Resend quota</td><td>6 reports queued in three days, all sent out through Resend</td><td>One setting</td></tr>
+<tr><td>4</td><td>Backups never leave the VM</td><td>The nightly tarball is written to <code>/var/backups/stalwart</code> on the same disk</td><td>An evening</td></tr>
+<tr><td>5</td><td>Nothing alerts when a hop breaks</td><td>The first sign of a failure would be a person saying they got a bounce</td><td>An evening</td></tr>
+<tr><td>6</td><td>Stalwart listens on every interface, with no host firewall</td><td>Ports 25, 465, 993, 995, 4190, 443 and 8080 are bound to <code>*</code>; the nftables INPUT policy is accept</td><td>Half an hour</td></tr>
+<tr><td>7</td><td>Small loose ends</td><td>MTA-STS removed, the 2-minute delay, DANE log noise, the phone app, upgrades</td><td>Each small</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="junk">
+<h2><span class="num">1.</span> Real mail is going to Junk</h2>
+<p>Between 8 and 11 October Stalwart delivered 9 inbound messages into mailboxes. 3 were filed as ham and 6 as <code>message-ingest.spam</code>. One of the 6 was my own unsigned loopback test from <code>example.org</code>, which deserved it. The other 5 were transactional mail from Anthropic, Claude and HubSpot. The 11 October one from <code>email.claude.com</code> logged <code>smtp.dkim-pass</code> and <code>smtp.dmarc-pass</code> and still went to Junk.</p>
+<p>The likely cause is the shape of the inbound path, not the senders. Every message reaches Stalwart from <code>127.0.0.1</code>, so SPF fails for every sender (part 09 already lists <code>smtp.spf-from-fail</code> as expected), and the spam filter cannot score the real sending IP. A soft SPF fail plus a bulk-mail sender is enough to tip the score. I have not read the score breakdown yet, which is the first step:</p>
+<ol>
+  <li>In Roundcube, open one of the junked messages, then <strong>More › View source</strong>. Stalwart's <code>X-Spam-Status</code> and <code>X-Spam-Result</code> headers name each rule that fired and its weight. That turns "likely" into a fact.</li>
+  <li><strong>Proposal: stop checking SPF for loopback sessions.</strong> SPF on a connection from <code>127.0.0.1</code> can only ever fail, so it adds noise and no information. In Stalwart, the SPF verification setting for the session takes an expression; make it skip when <code>remote_ip</code> is <code>127.0.0.1</code> and stay <code>relaxed</code> otherwise. DKIM and DMARC still decide, as they already do in practice.</li>
+  <li><strong>Proposal: let ARC carry Cloudflare's verdict.</strong> Email Routing adds ARC headers recording the SPF result it saw against the real sending IP. Stalwart verifies ARC; if the spam filter is set to trust a valid seal from Cloudflare, the lost SPF signal comes back.</li>
+  <li><strong>Train the filter.</strong> Moving a message from Junk to Inbox teaches Stalwart's Bayes classifier. Do it for the 5 now, and check that spam training is switched on under the spam filter settings.</li>
+</ol>
+<div class="callout warn"><div class="label">Why this comes first</div>
+<p>A mail server that delivers to Junk feels like one that loses mail, because nobody checks Junk. Password resets and receipts are exactly the mail this domain is for, and that is the mail being misfiled.</p></div>
+</section>
+
+<section id="fallback">
+<h2><span class="num">2.</span> A fallback when home is down</h2>
+<p>The Worker (<code>worker/src/index.ts</code>) has two outcomes. A permanent SMTP error from Stalwart becomes <code>message.setReject()</code>, which bounces to the sender. Any other failure (tunnel down, srv1 rebooting, a power cut at home) is re-thrown, and the message's fate is then up to Email Routing and the sender's retry logic. There is no second place for the mail to go.</p>
+<p><strong>Proposal:</strong> on a temporary failure, forward a copy to a backup mailbox before giving up:</p>
+<pre><code>} catch (error) {
+  if (error instanceof SmtpPermanentError) {
+    message.setReject(error.message);
+    return;
+  }
+  // srv1 or the tunnel is unreachable: keep the mail somewhere rather than nowhere
+  await message.forward(env.FALLBACK_ADDRESS);
+}</code></pre>
+<p><code>FALLBACK_ADDRESS</code> is a new variable in <code>wrangler.jsonc</code>, and the address has to be added and verified under <strong>Email Routing › Destination addresses</strong> first. A Gmail address works. The cost: during an outage, mail sits in Gmail instead of Stalwart, and I move it back by hand. The benefit: no outage at home loses mail.</p>
+</section>
+
+<section id="reports">
+<h2><span class="num">3.</span> DMARC reports are spending the send quota</h2>
+<p>Stalwart sends DMARC aggregate reports back to each domain that sent me mail. The logs show 6 reports queued in three days, to <code>mailauth-reports@google.com</code>, <code>dmarc-reports@anthropic.com</code> and Cloudflare's report address. Another 3 were refused as <code>outgoing-report.unauthorized-reporting-address</code> and 3 as <code>dmarc-rate-limited</code>. Every report that goes out uses the <code>resend</code> route and counts against the free plan's 100 a day and 3,000 a month. The more mail I receive, the more reports I send.</p>
+<p><strong>Proposal:</strong> turn outgoing DMARC (and TLS) aggregate reports off under Stalwart's reporting settings. Nobody depends on a personal server's reports. Receiving reports is a separate setting and should stay on: the <code>_dmarc</code> record's <code>rua=mailto:postmaster@22112002.xyz</code> and the <code>_smtp._tls</code> TLS-RPT record are how I learn who is sending as me. Check that <code>postmaster@</code> exists as an alias on my account, or those reports bounce.</p>
+</section>
+
+<section id="backups">
+<h2><span class="num">4.</span> Backups that leave the building</h2>
+<p>A nightly timer, <code>stalwart-backup.timer</code>, runs at 03:30 and writes two files to <code>/var/backups/stalwart</code>: a tarball of the Stalwart config, env file, RocksDB directory and the Roundcube config, and a <code>mariadb-dump</code> of the Roundcube database. It keeps 14 days, and every run since 8 October finished. Three things are missing:</p>
+<ul>
+  <li><strong>The copy is on the same virtual disk.</strong> If srv1's disk or the Proxmox host dies, the backup dies with the original. Copy the newest pair off the VM each night: to <code>pve</code> or the laptop over Tailscale with <code>rsync</code>, or encrypted with <code>restic</code> to a free Cloudflare R2 bucket (10 GB free; the archive is 3 MB today).</li>
+  <li><strong>RocksDB is copied while Stalwart runs.</strong> The script's own comment says so. Stalwart has a built-in export (its migration/backup command) that produces a consistent copy; use that, or stop the service for the few seconds the tar takes at 03:30.</li>
+  <li><strong>No restore has been tested.</strong> Once: start a scratch VM, unpack last night's archive, start Stalwart, log in with Roundcube. A backup is only real once it has been restored.</li>
+</ul>
+</section>
+
+<section id="monitoring">
+<h2><span class="num">5.</span> Find out before a sender does</h2>
+<p>Part 09's <code>mailcheck.sh</code> is good at finding a fault once I suspect one. Nothing tells me there is one. The cheapest end-to-end alarm tests the whole loop on a schedule:</p>
+<ol>
+  <li>A timer on srv1 (or the laptop) sends a message once a day from <code>olwethu@22112002.xyz</code> to a Gmail address, through Stalwart, so through Resend.</li>
+  <li>A Gmail filter auto-forwards anything with that subject back to a second address, such as <code>canary@22112002.xyz</code>, so through Email Routing, the Worker and the tunnel.</li>
+  <li>The timer checks the canary mailbox over IMAP an hour later. If the message is there, it pings a free <a href="https://healthchecks.io">healthchecks.io</a> check; if the ping does not arrive, healthchecks.io emails or messages me.</li>
+</ol>
+<p>That one loop covers DNS, both Cloudflare hops, the tunnel, Stalwart, Resend and Gmail's acceptance. Two cheaper extras: a <code>systemd</code> <code>OnFailure=</code> hook on <code>stalwart</code> and <code>cloudflared</code>, and Resend's webhook for <code>email.bounced</code> pointed at the same alert channel.</p>
+</section>
+
+<section id="listeners">
+<h2><span class="num">6.</span> Narrow the listeners</h2>
+<p><code>ss -ltnp</code> on 11 October shows Stalwart bound to <code>*</code> on 25, 465, 993, 995, 4190, 443 and 8080. srv1 has three addresses: loopback, the LAN (<code>10.0.0.10</code>) and Tailscale. The only nftables rules are Tailscale's, and the INPUT policy is accept. So anything on the home LAN can reach the admin UI over plain HTTP on 8080, and can talk SMTP to port 25 directly, without Cloudflare's filtering in front.</p>
+<p><strong>Proposal:</strong></p>
+<ul>
+  <li>Bind 25 to <code>127.0.0.1</code>. The Worker arrives through <code>cloudflared</code>, which connects to loopback, so nothing changes for it.</li>
+  <li>Bind 8080 (admin) to <code>127.0.0.1</code> and the Tailscale address only. Remote admin goes over Tailscale, as it did during the build.</li>
+  <li>Drop the POP3 listener (995) if no client uses it. Keep 4190 only if Sieve filters will be managed from Roundcube (part 11).</li>
+  <li>Or, more simply, add a small nftables table that accepts loopback and <code>tailscale0</code>, plus 80 from the LAN for Caddy, and drops the rest.</li>
+</ul>
+</section>
+
+<section id="loose-ends">
+<h2><span class="num">7.</span> Loose ends</h2>
+<table>
+<thead><tr><th>Item</th><th>State</th><th>Proposal</th></tr></thead>
+<tbody>
+<tr><td>MTA-STS</td><td>Removed with the MX handover; no <code>_mta-sts</code> record exists. TLS-RPT is still published.</td><td>Publish a policy listing <code>route1/2/3.mx.cloudflare.net</code> in <code>mode: enforce</code>, served at <code>mta-sts.22112002.xyz</code> through Caddy, plus the <code>_mta-sts</code> TXT. Senders then refuse to downgrade to plaintext.</td></tr>
+<tr><td>DMARC <code>p=reject</code></td><td>Part 05 planned to lower it to <code>none</code>. Since then, a strict receiver judged the relayed mail <code>dmarc=pass</code>.</td><td>Keep <code>reject</code>, now that alignment has been proven through Resend. Lowering it would only make spoofing my domain easier.</td></tr>
+<tr><td>Two-minute delay</td><td>Worker log 16:09:41, Stalwart EHLO about two minutes later, on the first message. Unresolved.</td><td>Time the next few messages with <code>wrangler tail</code> against the Stalwart log. If it is only the first connection after idle, it is a cold VPC connect and harmless.</td></tr>
+<tr><td>DANE log noise</td><td><code>dane.tlsa-record-not-dnssec-signed</code> for every remote domain, because Tailscale's resolver does not validate DNSSEC.</td><td>Outbound always goes to Resend, so DANE checks against recipient MXs never apply. Set the outbound TLS strategy's DANE to <code>disable</code> to quiet the log.</td></tr>
+<tr><td>Phone app</td><td>Twake Mail rejected the URL before sending a request; the server side checks out.</td><td>Try the three URL forms, then Sterna Mail. Or add IMAP on 993 for the phone over Tailscale, which every mail app speaks.</td></tr>
+<tr><td>RAM</td><td>1.9 GiB total, 777 MiB used, 1.2 GiB available, swap unused.</td><td>Fine for now. Raise the VM to 3 GiB if full-text search or the spam filter's Bayes data grows.</td></tr>
+<tr><td>Upgrades</td><td>Stalwart 0.16.25 from the installer; the Worker is vendored from a two-commit repo.</td><td>Watch Stalwart's GitHub releases. Take a backup before each upgrade, and run <code>mailcheck.sh</code> plus the canary after it.</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>False positive (spam)</dt><dd>Legitimate mail the spam filter scored as spam. The failure that matters most for a personal mailbox, because Junk is rarely read.</dd>
+<dt>ARC</dt><dd>Authenticated Received Chain. Headers a forwarding hop adds to record the SPF, DKIM and DMARC results it saw, signed so that the next hop can trust them. How Cloudflare's view of the real sending IP can survive the trip to Stalwart.</dd>
+<dt>Fallback forward</dt><dd>The Worker sending a copy to a verified backup address when it cannot reach Stalwart, so an outage at home delays mail instead of losing it.</dd>
+<dt>Canary message</dt><dd>A scheduled test message that goes all the way round, out and back in, so that a silent failure anywhere on the path becomes a missed check-in.</dd>
+<dt>Outgoing DMARC report</dt><dd>An aggregate report my server sends to other domains about the mail they sent me. Optional, and on this design it is paid for out of the Resend quota.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="09-testing.html">← 09 · Testing and troubleshooting</a>
+  <a href="11-what-you-can-do.html">11 · What you can do with it →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
