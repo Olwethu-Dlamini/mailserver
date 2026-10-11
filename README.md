@@ -24,6 +24,8 @@ Open `index.html` in a browser, or start with the first page.
 | 07 | [Build part 1: everything at home](07-build-home.html) | Built 8 October 2026 (morning): Stalwart, domain, wildcard certificate via DNS-01, Roundcube, accounts, tested over Tailscale. Raw notes in `notes/build-log-2026-10-08.md` |
 | 08 | [Build part 2: the free front door, as built](08-build-front-door.html) | Built 8 October 2026 (afternoon): JMAP through the tunnel, the Worker, Resend, the MX handover to Email Routing, first messages both ways |
 | 09 | [Testing and troubleshooting](09-testing.html) | One command per hop, the faults met on the day |
+| 10 | [Improving the system as built](10-improvements.html) | Evidence from three days of running: Junk false positives, a Worker fallback, the Resend quota, off-site backups, alerting, listeners |
+| 11 | [What you can do with it](11-what-you-can-do.html) | Per-service addresses, Sieve, homelab alerts, sending from apps (SMTP or Resend API), CalDAV/CardDAV, Worker automation |
 | — | [Glossary](glossary.html) | Every term |
 
 The Email Worker lives in [`worker/`](worker/), vendored from
