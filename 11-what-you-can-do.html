@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>11 · What You Can Do With It</title>
+<meta name="description" content="Uses for a self-hosted domain mailbox once it works: an address per service, server-side filters, alerts from the homelab, sending from scripts and apps through Stalwart or the Resend API, calendars and contacts, and mail-triggered automation in the Worker. With the limits of the free design for each.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="10-improvements.html">10</a><a class="active" href="11-what-you-can-do.html">11</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 11 · After the build</div>
+  <h1>What You Can Do With It</h1>
+  <p class="lead">A mailbox on my own domain, on my own machine, with a programmable front door and an API-driven relay, can do much more than receive newsletters. This page lists what it is good for, starting with the uses that need no new software and ending with the ones that need code.</p>
+  <div class="meta">Written 11 October 2026 against the as-built design: Stalwart 0.16.25 on srv1, Cloudflare Email Routing with a catch-all to the Worker, Resend's free plan for sending. Every send counts against Resend's 100 a day and 3,000 a month.</div>
+</header>
+
+<section id="addresses">
+<h2><span class="num">1.</span> An address for every service</h2>
+<p>The Email Routing rule is a catch-all: Cloudflare hands <em>every</em> address at <code>22112002.xyz</code> to the Worker, and Stalwart decides what exists. That makes addresses free:</p>
+<ul>
+  <li><strong>Plus addressing:</strong> sign up as <code>olwethu+bank@22112002.xyz</code> or <code>olwethu+shop@22112002.xyz</code>. Stalwart delivers it to <code>olwethu@</code>, and the <code>To:</code> header shows which service leaked or sold the address.</li>
+  <li><strong>Aliases:</strong> add <code>postmaster@</code>, <code>abuse@</code>, <code>admin@</code>, <code>hello@</code> as aliases on my account in the Stalwart admin UI. The first two are expected by other mail operators, and <code>postmaster@</code> receives the DMARC and TLS reports (part 10, section 3).</li>
+  <li><strong>A domain catch-all in Stalwart:</strong> optionally, deliver any unknown local part to one mailbox. Then <code>netflix@22112002.xyz</code> works without setting anything up first. The cost is more spam once the domain is on lists, so plus addressing is the tidier choice.</li>
+  <li><strong>Burner addresses:</strong> when an address starts receiving spam, reject it in Stalwart or Sieve. Nothing else breaks.</li>
+</ul>
+<div class="callout tip"><div class="label">Portable identity</div>
+<p>Accounts registered to <code>@22112002.xyz</code> survive a change of provider. If Stalwart, Cloudflare or Resend ever goes away, the MX and the relay change, and the address stays the same.</p></div>
+</section>
+
+<section id="filters">
+<h2><span class="num">2.</span> Server-side filters with Sieve</h2>
+<p>Stalwart runs Sieve scripts at delivery, and its ManageSieve listener is already up on 4190. Roundcube's <code>managesieve</code> plugin gives a point-and-click editor for rules that run on the server, so they apply to every client, phone included:</p>
+<pre><code>require ["fileinto", "subaddress", "envelope"];
+# olwethu+anything@ goes to a folder named after the tag
+if envelope :detail "to" "bank"  { fileinto "Finance"; stop; }
+if envelope :detail "to" "shop"  { fileinto "Receipts"; stop; }
+# trusted transactional senders never go to Junk
+if address :domain "from" ["anthropic.com", "claude.com", "github.com"] { fileinto "INBOX"; stop; }</code></pre>
+<p>The last rule is a stopgap for part 10's Junk problem while the real fix is made.</p>
+</section>
+
+<section id="homelab">
+<h2><span class="num">3.</span> Alerts from the homelab</h2>
+<p>The most useful mail this server sends will be to me. Every machine on the tailnet can submit through Stalwart over Tailscale on 465, so homelab alerts arrive DKIM-signed from my own domain instead of from an unknown host:</p>
+<ul>
+  <li><strong>Proxmox:</strong> Datacenter › Notifications › add an SMTP target: <code>100.72.72.58</code> port 465, TLS, user <code>alerts@22112002.xyz</code>. Backup job failures and disk SMART warnings then reach the inbox.</li>
+  <li><strong>Debian on srv1:</strong> <code>unattended-upgrades</code> reports, <code>cron</code> <code>MAILTO=</code> output and systemd <code>OnFailure=</code> units, through a small sendmail-compatible client (<code>msmtp</code>) pointed at <code>127.0.0.1:465</code>.</li>
+  <li><strong>Uptime Kuma or healthchecks.io:</strong> both can notify by SMTP. That gives part 10's canary somewhere to report.</li>
+</ul>
+<p>Make a separate Stalwart account (or an app password) for alerts, so a leaked credential on one machine can be revoked without touching my own login.</p>
+</section>
+
+<section id="apps">
+<h2><span class="num">4.</span> Sending from scripts and apps</h2>
+<p>Anything I build (the LMS on <code>lms.22112002.xyz</code>, a contact form, a side project) can send real mail from the domain. There are two ways in, and each needs a different key:</p>
+<table>
+<thead><tr><th></th><th>Through Stalwart (SMTP)</th><th>Straight to Resend (HTTP API)</th></tr></thead>
+<tbody>
+<tr><td>Credential</td><td>A Stalwart account or app password</td><td>A Resend API key with <em>Sending access</em>, scoped to <code>22112002.xyz</code></td></tr>
+<tr><td>Where to create it</td><td>Stalwart admin › the account › app passwords</td><td>resend.com › API Keys › Create API key (one key per app)</td></tr>
+<tr><td>Copy in Sent folder</td><td>Yes, if the client saves it over IMAP</td><td>No: Stalwart never sees the message</td></tr>
+<tr><td>Works from</td><td>Only machines that can reach srv1 (tailnet, loopback)</td><td>Anywhere, including Cloudflare Workers and serverless hosts</td></tr>
+<tr><td>Good for</td><td>Homelab apps, anything on srv1</td><td>Apps hosted elsewhere, delivery webhooks, bounce tracking</td></tr>
+</tbody>
+</table>
+<p>An HTTP send is one request:</p>
+<pre><code>curl -s https://api.resend.com/emails \
+  -H "Authorization: Bearer $RESEND_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"from":"LMS &lt;noreply@22112002.xyz&gt;","to":["someone@example.com"],
+       "subject":"Your account","text":"Welcome."}'</code></pre>
+<div class="callout warn"><div class="label">Keys are per purpose</div>
+<p>The existing Resend key named <code>stalwart</code> is Stalwart's relay password. Do not reuse it in an app: create a new key per app, so one can be revoked without stopping all outbound mail. Keep keys in an env file or a Worker secret (<code>wrangler secret put</code>), never in this repo.</p></div>
+</section>
+
+<section id="dav">
+<h2><span class="num">5.</span> Calendars, contacts and files</h2>
+<p>Stalwart is more than a mail server: it also serves CalDAV (calendars), CardDAV (contacts) and WebDAV (files) for the same accounts. That is a replacement for Google Calendar and Contacts, on hardware I own. The endpoints sit under <code>https://mail.22112002.xyz/dav/</code>, published through the existing tunnel and Caddy like JMAP. Phones connect with DAVx⁵ on Android or the built-in account settings on iOS. Before relying on it, confirm on 0.16.25 that the <code>/dav</code> paths answer through Caddy and are not blocked by the Caddy block that hides <code>/admin</code>.</p>
+</section>
+
+<section id="worker">
+<h2><span class="num">6.</span> Mail as a trigger: more from the Worker</h2>
+<p>Every inbound message already runs through code I control before it reaches Stalwart. That Worker can do more than relay:</p>
+<ul>
+  <li><strong>Notify a phone:</strong> for mail to a chosen address, also post the subject and sender to a Telegram bot or a Discord webhook. A push notification without a mail app.</li>
+  <li><strong>Mail-to-task:</strong> mail to <code>todo@</code> turns into a row in a database or a task, parsed with the <code>postal-mime</code> library.</li>
+  <li><strong>Reject at the edge:</strong> refuse known-bad senders with <code>message.setReject()</code> before they cost a tunnel round trip.</li>
+  <li><strong>Fallback forward:</strong> the outage protection in part 10, section 2.</li>
+</ul>
+<p>Each of these sits beside the delivery to Stalwart, not in place of it, so the mailbox stays the record of everything that arrived.</p>
+</section>
+
+<section id="people">
+<h2><span class="num">7.</span> Mailboxes for other people</h2>
+<p>Stalwart can host more accounts and more domains at no extra cost: a family member's address, or a second domain with its own Email Routing rule pointing at the same Worker. Two limits apply:</p>
+<ul>
+  <li><strong>Resend's free plan covers the whole server.</strong> 100 messages a day are shared between everyone. Several active users would need the paid plan, or a second relay chosen by sender in Stalwart's routing strategy.</li>
+  <li><strong>The server becomes their mail provider.</strong> An outage at home or a lost disk now affects someone else. Do part 10's fallback forward and off-site backups before adding anyone.</li>
+</ul>
+</section>
+
+<section id="learn">
+<h2><span class="num">8.</span> As a lab</h2>
+<p>A working mail server is a good place to learn the parts of the internet most people never see: read DMARC aggregate reports to find out who sends as the domain, try MTA-STS and watch TLS-RPT reports arrive, write Sieve, read raw headers until the authentication results make sense at a glance. The series so far is the notes; this part is the to-do list.</p>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>Plus addressing</dt><dd>Adding <code>+tag</code> to the local part (<code>olwethu+bank@</code>). The server delivers it to the base address, and Sieve can read the tag as the <code>:detail</code> part.</dd>
+<dt>App password</dt><dd>A second password on a mail account, for one device or app, which can be revoked on its own.</dd>
+<dt>Resend API key</dt><dd>A bearer token for Resend's HTTP API and SMTP relay. Scoped to sending, and optionally to one domain.</dd>
+<dt>CalDAV / CardDAV</dt><dd>Open protocols for syncing calendars and contacts over HTTPS. What Google, Apple and Stalwart all speak underneath.</dd>
+<dt><code>msmtp</code></dt><dd>A small SMTP client that behaves like <code>sendmail</code>, so cron, scripts and system tools can send through Stalwart.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="10-improvements.html">← 10 · Improving the system as built</a>
+  <a href="glossary.html">Glossary →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
