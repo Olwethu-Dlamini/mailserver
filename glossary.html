@@ -244,6 +244,30 @@
 <dd>A name Cloudflare invents when an MX record points at a proxied hostname, so the MX resolves to something. It is a symptom that the MX target is wrong for mail, not a feature.</dd>
 <dt>JMAP client <span class="muted">· 05</span></dt>
 <dd>A mail app that talks JMAP over HTTPS instead of IMAP. Twake Mail (Android, iOS), Sterna Mail and Ltt.rs (Android) all work against Stalwart through the tunnel at <code>mail.22112002.xyz</code>.</dd>
+
+<dt>False positive (spam) <span class="muted">· 10</span></dt>
+<dd>Legitimate mail the spam filter scored as spam. Between 8 and 11 October, 5 of the 6 messages Stalwart filed as Junk were genuine transactional mail with DKIM and DMARC passing.</dd>
+
+<dt>ARC <span class="muted">· 10</span></dt>
+<dd>Authenticated Received Chain. Signed headers a forwarding hop adds to record the authentication results it saw. Cloudflare Email Routing adds them, so its SPF verdict against the real sending IP can reach Stalwart even though the connection arrives from 127.0.0.1.</dd>
+
+<dt>Fallback forward <span class="muted">· 10</span></dt>
+<dd>The Worker forwarding a message to a verified backup address when it cannot reach Stalwart, so an outage at home delays mail instead of losing it.</dd>
+
+<dt>Canary message <span class="muted">· 10</span></dt>
+<dd>A scheduled test message that goes all the way out and back in, so that a silent failure anywhere on the path shows up as a missed check-in.</dd>
+
+<dt>Plus addressing <span class="muted">· 11</span></dt>
+<dd><code>olwethu+tag@22112002.xyz</code> is delivered to <code>olwethu@</code>. The tag shows which service an address was given to, and Sieve can file on it.</dd>
+
+<dt>App password <span class="muted">· 11</span></dt>
+<dd>A second password on a mail account for one device or app, revocable on its own.</dd>
+
+<dt>Resend API key <span class="muted">· 11</span></dt>
+<dd>A bearer token for Resend's HTTP API and SMTP relay, scoped to sending and optionally to one domain. One per app; the key named <code>stalwart</code> is the relay password and stays Stalwart's.</dd>
+
+<dt>CalDAV / CardDAV <span class="muted">· 11</span></dt>
+<dd>Open protocols for syncing calendars and contacts over HTTPS. Stalwart serves both for the same accounts as mail.</dd>
 </dl>
 </section>
 
