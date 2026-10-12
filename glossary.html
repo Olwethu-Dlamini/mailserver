@@ -271,11 +271,23 @@
 
 <dt>CalDAV / CardDAV <span class="muted">· 11</span></dt>
 <dd>Open protocols for syncing calendars and contacts over HTTPS. Stalwart serves both for the same accounts as mail.</dd>
+
+<dt>PROXY protocol <span class="muted">· 12</span></dt>
+<dd>A one-line header a proxy sends at the start of a TCP connection naming the real client IP, so the server behind it sees the true sender. What a VPS relay uses to keep SPF working; what the Worker path cannot offer.</dd>
+
+<dt>Store and forward (Worker) <span class="muted">· 12</span></dt>
+<dd>Writing each inbound message to R2 and a Cloudflare Queue before delivering it, so an outage at home delays mail instead of risking it. How mailbridge does it.</dd>
+
+<dt><code>x-cf-spamh-score</code> <span class="muted">· 12</span></dt>
+<dd>Cloudflare's own spam score, added as a header to mail handed to a Worker. One of the few signals about the real sender that survives the trip.</dd>
+
+<dt>Heartbeat monitor <span class="muted">· 12</span></dt>
+<dd>A check that expects a job to report in on a schedule and alerts when it goes quiet. Suits backups and canaries.</dd>
 </dl>
 </section>
 
 <div class="pager">
-  <a href="11-what-you-can-do.html">← 11 · What you can do with it</a>
+  <a href="12-what-others-do.html">← 12 · What others do</a>
   <a href="index.html">Series index →</a>
 </div>
 </main>
