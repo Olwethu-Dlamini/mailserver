@@ -249,7 +249,10 @@
 <dd>Legitimate mail the spam filter scored as spam. Between 8 and 11 October, 5 of the 6 messages Stalwart filed as Junk were genuine transactional mail with DKIM and DMARC passing.</dd>
 
 <dt>ARC <span class="muted">· 10</span></dt>
-<dd>Authenticated Received Chain. Signed headers a forwarding hop adds to record the authentication results it saw. Cloudflare Email Routing adds them, so its SPF verdict against the real sending IP can reach Stalwart even though the connection arrives from 127.0.0.1.</dd>
+<dd>Authenticated Received Chain. Signed headers a forwarding hop adds to record the authentication results it saw. Mail handed to an Email Worker carries <code>arc=none</code> (workerd issue #6740), so ARC cannot bring back the SPF result lost on the tunnel.</dd>
+
+<dt>Auto-ban <span class="muted">· 10</span></dt>
+<dd>Stalwart's automatic, by default permanent, IP block after too many abuse events or failed logins. A risk here because all inbound mail shares the tunnel's one address.</dd>
 
 <dt>Fallback forward <span class="muted">· 10</span></dt>
 <dd>The Worker forwarding a message to a verified backup address when it cannot reach Stalwart, so an outage at home delays mail instead of losing it.</dd>

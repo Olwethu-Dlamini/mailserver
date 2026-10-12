@@ -161,6 +161,7 @@ EOF</code></pre>
 <tr><td>"certificate is not yet valid" anywhere</td><td>Clock wrong on the complaining machine</td><td>4</td><td><code>timedatectl</code>, <code>timedatectl set-ntp true</code>.</td></tr>
 <tr><td>Gmail's Show original: DKIM pass, DMARC fail</td><td>Alignment: Resend's DKIM record missing, or the From address is at another domain</td><td>6</td><td><code>q resend._domainkey.22112002.xyz TXT</code>; check the Roundcube identity's From address.</td></tr>
 <tr><td>Genuine mail (DKIM and DMARC pass) lands in Junk; log shows <code>message-ingest.spam</code></td><td>Every inbound connection comes from 127.0.0.1, so SPF always fails and the filter cannot score the real sending IP. Seen 5 times between 8 and 11 October</td><td>4</td><td>Read <code>X-Spam-Result</code> in the message source first; then part 10, section 1.</td></tr>
+<tr><td>All inbound mail suddenly refused; Worker logs a rejection from Stalwart</td><td>Auto-ban has blocked the tunnel's address after a burst of spam to unknown recipients</td><td>3–4</td><td>Remove the entry from Stalwart's blocked-IP list; set a ban period and exempt the tunnel listener (part 10, section 1).</td></tr>
 <tr><td>Phone JMAP app cannot find the server</td><td><code>mail.22112002.xyz</code> not routed through the tunnel, or <code>STALWART_PUBLIC_URL</code> unset</td><td>1</td><td><code>curl -sI https://mail.22112002.xyz/.well-known/jmap</code> must return 307; check the Caddy block and the env file.</td></tr>
 </tbody>
 </table>
