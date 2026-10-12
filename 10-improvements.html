@@ -24,7 +24,7 @@
   <div class="kicker">Part 10 · After the build</div>
   <h1>Improving the System as Built</h1>
   <p class="lead">It works: mail arrives from Gmail through Cloudflare and the Worker, and leaves through Resend with DMARC passing at a strict receiver. Three days of logs say what to fix next. This page lists each problem, the evidence for it, and the change I would make, ordered by how much it matters.</p>
-  <div class="meta">Measured on 11 October 2026 from srv1 (Stalwart 0.16.25) and public DNS. The counts cover the Stalwart logs for 8 to 11 October. A change that has not been made yet is marked as a proposal.</div>
+  <div class="meta">Revised 12 October 2026 after comparing with what others run (part 12): the ARC proposal was withdrawn and the backup method corrected. Measured on 11 October 2026 from srv1 (Stalwart 0.16.25) and public DNS. The counts cover the Stalwart logs for 8 to 11 October. A change that has not been made yet is marked as a proposal.</div>
 </header>
 
 <section id="summary">
@@ -32,7 +32,7 @@
 <table>
 <thead><tr><th>#</th><th>Problem</th><th>Evidence</th><th>Effort</th></tr></thead>
 <tbody>
-<tr><td>1</td><td>Genuine mail is filed as Junk</td><td>5 of 6 "Possible spam" messages were legitimate, with DKIM and DMARC passing</td><td>An hour</td></tr>
+<tr><td>1</td><td>Genuine mail is filed as Junk, and the tunnel address could be auto-banned</td><td>5 of 6 "Possible spam" messages were legitimate, with DKIM and DMARC passing</td><td>An hour</td></tr>
 <tr><td>2</td><td>Mail is lost while the tunnel or srv1 is down</td><td>The Worker throws on any temporary failure; there is no second destination</td><td>A few lines in the Worker</td></tr>
 <tr><td>3</td><td>Outgoing DMARC reports spend the Resend quota</td><td>6 reports queued in three days, all sent out through Resend</td><td>One setting</td></tr>
 <tr><td>4</td><td>Backups never leave the VM</td><td>The nightly tarball is written to <code>/var/backups/stalwart</code> on the same disk</td><td>An evening</td></tr>
@@ -49,12 +49,14 @@
 <p>The likely cause is the shape of the inbound path, not the senders. Every message reaches Stalwart from <code>127.0.0.1</code>, so SPF fails for every sender (part 09 already lists <code>smtp.spf-from-fail</code> as expected), and the spam filter cannot score the real sending IP. A soft SPF fail plus a bulk-mail sender is enough to tip the score. I have not read the score breakdown yet, which is the first step:</p>
 <ol>
   <li>In Roundcube, open one of the junked messages, then <strong>More › View source</strong>. Stalwart's <code>X-Spam-Status</code> and <code>X-Spam-Result</code> headers name each rule that fired and its weight. That turns "likely" into a fact.</li>
-  <li><strong>Proposal: stop checking SPF for loopback sessions.</strong> SPF on a connection from <code>127.0.0.1</code> can only ever fail, so it adds noise and no information. In Stalwart, the SPF verification setting for the session takes an expression; make it skip when <code>remote_ip</code> is <code>127.0.0.1</code> and stay <code>relaxed</code> otherwise. DKIM and DMARC still decide, as they already do in practice.</li>
-  <li><strong>Proposal: let ARC carry Cloudflare's verdict.</strong> Email Routing adds ARC headers recording the SPF result it saw against the real sending IP. Stalwart verifies ARC; if the spam filter is set to trust a valid seal from Cloudflare, the lost SPF signal comes back.</li>
+  <li><strong>Proposal: stop checking SPF for tunnel sessions.</strong> SPF on a connection from <code>127.0.0.1</code> can only ever fail, so it adds noise and no information. Stalwart's maintainer gave the recipe for exactly this case on the support forum in June 2026: give the relay its own listener, and in the sender-authentication expressions set the SPF EHLO and SPF MAIL FROM checks to <code>disable</code> when <code>listener</code> (or <code>remote_ip</code>) is the tunnel's. DKIM and DMARC still verify, because the Worker passes the message bytes through unchanged, and they are what decide in practice already.</li>
+  <li><strong>Not an option: ARC.</strong> The first version of this page proposed trusting Cloudflare's ARC seal to carry its SPF verdict through. Cloudflare's own issue tracker says otherwise: <a href="https://github.com/cloudflare/workerd/issues/6740">workerd #6740</a> (open since May 2026) shows that mail reaching an Email Worker carries <code>arc=none</code>, no <code>Authentication-Results</code> and no <code>Received-SPF</code>. The real sending IP never reaches the Worker, so nothing downstream can check SPF. What does arrive is an <code>x-cf-spamh-score</code> header, which a Sieve rule or a custom spam-filter rule can use as an extra signal.</li>
   <li><strong>Train the filter.</strong> Moving a message from Junk to Inbox teaches Stalwart's Bayes classifier. Do it for the 5 now, and check that spam training is switched on under the spam filter settings.</li>
 </ol>
 <div class="callout warn"><div class="label">Why this comes first</div>
 <p>A mail server that delivers to Junk feels like one that loses mail, because nobody checks Junk. Password resets and receipts are exactly the mail this domain is for, and that is the mail being misfiled.</p></div>
+<div class="callout warn"><div class="label">The same address, a bigger risk: auto-ban</div>
+<p>Stalwart bans IPs automatically: by default, 35 abuse events a day (relay attempts, probing for unknown recipients) or 100 failed logins, and with no ban period set the ban is permanent (<a href="https://stalw.art/docs/server/auto-ban">auto-ban docs</a>). Every inbound message arrives from the one tunnel address, so a busy day of spam to invented addresses at the catch-all could ban <code>127.0.0.1</code> and refuse all inbound mail. Check the blocked-IP list in the admin UI, set a ban period, and make sure the tunnel's listener or address is exempt.</p></div>
 </section>
 
 <section id="fallback">
@@ -83,7 +85,7 @@
 <p>A nightly timer, <code>stalwart-backup.timer</code>, runs at 03:30 and writes two files to <code>/var/backups/stalwart</code>: a tarball of the Stalwart config, env file, RocksDB directory and the Roundcube config, and a <code>mariadb-dump</code> of the Roundcube database. It keeps 14 days, and every run since 8 October finished. Three things are missing:</p>
 <ul>
   <li><strong>The copy is on the same virtual disk.</strong> If srv1's disk or the Proxmox host dies, the backup dies with the original. Copy the newest pair off the VM each night: to <code>pve</code> or the laptop over Tailscale with <code>rsync</code>, or encrypted with <code>restic</code> to a free Cloudflare R2 bucket (10 GB free; the archive is 3 MB today).</li>
-  <li><strong>RocksDB is copied while Stalwart runs.</strong> The script's own comment says so. Stalwart has a built-in export (its migration/backup command) that produces a consistent copy; use that, or stop the service for the few seconds the tar takes at 03:30.</li>
+  <li><strong>RocksDB is copied while Stalwart runs.</strong> The script's own comment says so. The supported recipe, from Stalwart's support forum (thread #386, May 2026), is to stop the service, copy the whole <code>/var/lib/stalwart</code> directory, and start it again: a few seconds of downtime at 03:30. Stalwart's <code>--export</code> also needs the server stopped, and its docs say it is "not a substitute for proper backup procedures", so it is not the answer either.</li>
   <li><strong>No restore has been tested.</strong> Once: start a scratch VM, unpack last night's archive, start Stalwart, log in with Roundcube. A backup is only real once it has been restored.</li>
 </ul>
 </section>
@@ -131,7 +133,8 @@
 <h2>Glossary for this part</h2>
 <dl class="gloss">
 <dt>False positive (spam)</dt><dd>Legitimate mail the spam filter scored as spam. The failure that matters most for a personal mailbox, because Junk is rarely read.</dd>
-<dt>ARC</dt><dd>Authenticated Received Chain. Headers a forwarding hop adds to record the SPF, DKIM and DMARC results it saw, signed so that the next hop can trust them. How Cloudflare's view of the real sending IP can survive the trip to Stalwart.</dd>
+<dt>ARC</dt><dd>Authenticated Received Chain. Headers a forwarding hop adds to record the SPF, DKIM and DMARC results it saw, signed so that the next hop can trust them. Email Routing does not provide useful ones to Workers (<code>arc=none</code>), so it cannot rescue SPF on this design.</dd>
+<dt>Auto-ban</dt><dd>Stalwart's automatic IP blocking after too many abuse events or failed logins. Dangerous when every inbound connection shares one address.</dd>
 <dt>Fallback forward</dt><dd>The Worker sending a copy to a verified backup address when it cannot reach Stalwart, so an outage at home delays mail instead of losing it.</dd>
 <dt>Canary message</dt><dd>A scheduled test message that goes all the way round, out and back in, so that a silent failure anywhere on the path becomes a missed check-in.</dd>
 <dt>Outgoing DMARC report</dt><dd>An aggregate report my server sends to other domains about the mail they sent me. Optional, and on this design it is paid for out of the Resend quota.</dd>
