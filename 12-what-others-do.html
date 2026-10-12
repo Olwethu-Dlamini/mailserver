@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>12 · What Others Do</title>
+<meta name="description" content="Other people's answers to the same problem, found on GitHub, Cloudflare's issue tracker and Stalwart's forum: Worker bridges that queue instead of drop, VPS relays that keep the real sender IP, Stalwart backup and monitoring practice, and free sending services other than Resend. Each with what to take from it.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="topbar"><div class="in">
+  <a class="brand" href="index.html">mail<span>.22112002.xyz</span></a>
+  <nav>
+    <a href="01-the-problem.html">01</a><a href="02-how-email-works.html">02</a><a href="03-dns-and-trust.html">03</a>
+    <a href="04-stalwart.html">04</a><a href="05-the-front-door.html">05</a><a href="06-roundcube.html">06</a>
+    <a href="07-build-home.html">07</a><a href="08-build-front-door.html">08</a><a href="09-testing.html">09</a>
+    <a href="10-improvements.html">10</a><a href="11-what-you-can-do.html">11</a><a class="active" href="12-what-others-do.html">12</a>
+    <a href="glossary.html">Glossary</a>
+  </nav>
+</div></div>
+
+<main>
+<header class="hero">
+  <div class="kicker">Part 12 · After the build</div>
+  <h1>What Others Do</h1>
+  <p class="lead">I am not the first person to put a mail server behind CGNAT, or to bridge Cloudflare Email Routing to a box at home. This page records what other people built for the same problem, what their projects do better than mine, and what each one gives me to take.</p>
+  <div class="meta">Collected on 12 October 2026 from GitHub, Cloudflare's issue tracker and docs, and Stalwart's docs and support forum. Stars and dates are as shown on the pages that day. Anything I could not open is marked unverified. Sources are listed in <code>notes/others-2026-10-12.md</code>.</div>
+</header>
+
+<section id="headline">
+<h2><span class="num">0.</span> The finding that changed part 10</h2>
+<p>Part 10 hoped Cloudflare's ARC headers would carry its SPF verdict to Stalwart. <a href="https://github.com/cloudflare/workerd/issues/6740">workerd issue #6740</a>, open since May 2026 with no reply from Cloudflare, shows that mail handed to an Email Worker has no <code>Authentication-Results</code>, no <code>Received</code> or <code>Received-SPF</code> headers, and <code>arc=none</code>. The connecting IP is never exposed. So on this design SPF cannot be checked anywhere after Cloudflare, by anyone. The honest fix is the one Stalwart's maintainer recommends for relays: stop checking SPF on the tunnel's listener and let DKIM and DMARC decide. Part 10 now says that.</p>
+<p>The same issue shows one useful header that does arrive: <code>x-cf-spamh-score</code>, Cloudflare's own spam score for the message.</p>
+</section>
+
+<section id="bridges">
+<h2><span class="num">1.</span> Other Cloudflare-to-home bridges</h2>
+<table>
+<thead><tr><th>Project</th><th>What it does</th><th>What to take</th></tr></thead>
+<tbody>
+<tr><td><a href="https://github.com/imrasalghul/mailbridge">imrasalghul/mailbridge</a><br><span class="muted">6★, v1.4.1, active 6 Oct 2026</span></td><td>The Worker encrypts each message into R2 and puts it on a Cloudflare Queue. A gateway at home pulls from the queue, runs SpamAssassin, and delivers to a private SMTP server. Local encrypted retry queue; a 5xx is reported back as permanent. Outbound through Resend, SendGrid, Mailgun or Cloudflare.</td><td>Store first, deliver second. A tunnel outage then delays mail instead of risking it. The grown-up version of part 10's fallback forward.</td></tr>
+<tr><td><a href="https://developers.cloudflare.com/email-service/api/route-emails/email-handler/">Cloudflare's Email Worker docs</a></td><td>The official error-handling example: try the main path, on failure <code>message.forward()</code> to an admin address, and only as a last resort reject. Inbound limit 25 MiB.</td><td>Confirms the ten-line fallback in part 10 is the intended pattern. What happens when the handler throws is not documented, which is another reason not to rely on it.</td></tr>
+<tr><td><a href="https://github.com/chawuciren/cloudflare-mail-server">chawuciren/cloudflare-mail-server</a><br><span class="muted">126★, Aug 2026</span></td><td>A multi-user mail service on Email Routing inbound and Resend outbound, in Node.js and SQLite. Same split as mine, no Stalwart.</td><td>A reference for the Cloudflare plus Resend split working for more than one person.</td></tr>
+<tr><td>bubblav-org/cloudflare-email-worker, bnqtoan/email2webhook</td><td>Workers that POST the raw message to an HTTPS endpoint instead of speaking SMTP.</td><td>The fallback design part 05 mentioned if Workers VPC goes away. Stalwart has no HTTP mail-injection endpoint (a September 2026 forum request has no answer), so it would need a small receiver.</td></tr>
+<tr><td><a href="https://github.com/Demivan/home-infra">Demivan/home-infra</a>, PR #98</td><td>Moved off Email Routing to Stalwart 0.16 with real ports, keeping the client IP, and let Stalwart publish its own DKIM, MTA-STS and TLS-RPT records into Cloudflare.</td><td>Stalwart can manage its own DNS records through the Cloudflare API, which keeps keys and records in step.</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="vps">
+<h2><span class="num">2.</span> The road not taken: a VPS and a tunnel</h2>
+<p>Part 05 dropped the VPS because the budget was zero. Others who paid for one solved the problems I now have:</p>
+<table>
+<thead><tr><th>Project</th><th>What it does</th><th>What it fixes for me</th></tr></thead>
+<tbody>
+<tr><td><a href="https://github.com/cmer/mailcow-vps-proxy">cmer/mailcow-vps-proxy</a><br><span class="muted">6★</span></td><td>HAProxy on the VPS forwards to home with PROXY protocol; Postfix on the VPS relays outbound and queues while home is down. Tailscale recommended.</td><td>The real sender IP reaches the mail server, so SPF and IP reputation work. Mail queues on the VPS during an outage. Outbound has no daily cap.</td></tr>
+<tr><td><a href="https://github.com/RomanYsrael-cmd/mailforge">RomanYsrael-cmd/mailforge</a></td><td>Postfix on a VPS takes port 25 and queues while home is unreachable, then forwards to Stalwart over WireGuard; HAProxy passes the other ports through.</td><td>The same, written for Stalwart.</td></tr>
+<tr><td><a href="https://github.com/markfalk/stalwart-mail-wgproxy">markfalk/stalwart-mail-wgproxy</a><br><span class="muted">9★</span></td><td>An EC2 instance with an Elastic IP forwards to Stalwart over WireGuard.</td><td>Simplest form. No PROXY protocol, backups or monitoring.</td></tr>
+<tr><td>pabloko's "VPS Email Relay" gist<br><span class="muted">Aug 2025</span></td><td>A €1-a-month VPS running a full Postfix with rDNS, RBL, SPF, DKIM and DMARC checks before relaying over WireGuard.</td><td>Its explicit warning against plain port-forwarding (socat) is my 127.0.0.1 problem described in advance.</td></tr>
+</tbody>
+</table>
+<div class="callout tip"><div class="label">When the VPS would be worth it</div>
+<p>If the Junk problem survives the SPF change, if the 100-a-day Resend cap starts to bite, or if other people get mailboxes here. At about €1 to €5 a month, a VPS with WireGuard, HAProxy and PROXY protocol fixes all three at once.</p></div>
+</section>
+
+<section id="stalwart">
+<h2><span class="num">3.</span> Stalwart practice from its docs and forum</h2>
+<ul>
+  <li><strong>Relays and SPF.</strong> A June 2026 support thread, answered by the maintainer, covers servers behind an inbound relay: use <code>listener</code> or <code>remote_ip</code> in the sender-authentication expressions to set SPF, DKIM and DMARC checks to <code>disable</code> or <code>relaxed</code> for relay traffic. Use PROXY protocol where the relay supports it, and lock the relay listener down.</li>
+  <li><strong>Auto-ban.</strong> <a href="https://stalw.art/docs/server/auto-ban">The docs</a> give defaults of 35 abuse events and 100 failed logins a day, and with no ban period the ban never expires. The docs show no allow-list and do not say whether localhost is exempt. On this design every inbound message shares one address, so this is the single setting most likely to stop all mail at once. Stalwart issue #3326 reports bans after the first expiry being logged but not enforced (not inspected).</li>
+  <li><strong>Backups.</strong> The supported method from the forum (thread #386, May 2026) is: stop Stalwart, copy the whole <code>/var/lib/stalwart</code> directory, start it. The <code>--export</code> and <code>--import</code> commands also need the server stopped, and the docs say they are "not a substitute for proper backup procedures".</li>
+  <li><strong>Metrics.</strong> Stalwart has a built-in <a href="https://stalw.art/docs/telemetry/metrics/prometheus">Prometheus endpoint</a> at <code>/metrics/prometheus</code> and an OpenTelemetry push option. The stock Grafana dashboard (23498) broke when metric names changed; <a href="https://github.com/Souheib-h/stalwart-monitoring-stack">Souheib-h/stalwart-monitoring-stack</a> has a corrected one but no alert rules.</li>
+  <li><strong>Report analysis.</strong> Stalwart <a href="https://stalw.art/docs/mta/reports/analysis">analyses incoming DMARC, TLS-RPT and failure reports itself</a> and logs problems as events. With <code>rua</code> already pointing at <code>postmaster@</code>, that may be enough without a separate parser.</li>
+  <li><strong>MTA-STS behind Cloudflare.</strong> My MX is Cloudflare's, so my MTA-STS policy must list Cloudflare's MX hosts. <a href="https://github.com/sethCHN/mta-sts-proxy">sethCHN/mta-sts-proxy</a> is a Worker that serves Cloudflare's published policy unchanged from <code>mta-sts.</code> on your own domain.</li>
+</ul>
+</section>
+
+<section id="monitoring">
+<h2><span class="num">4.</span> Monitoring and reports</h2>
+<table>
+<thead><tr><th>Project</th><th>What it does</th><th>What to take</th></tr></thead>
+<tbody>
+<tr><td><a href="https://github.com/domainaware/parsedmarc">domainaware/parsedmarc</a><br><span class="muted">1.3k★</span></td><td>Reads DMARC and TLS-RPT reports from IMAP and writes them to OpenSearch, Postgres or a webhook.</td><td>The standard tool if Stalwart's own report analysis is not enough.</td></tr>
+<tr><td><a href="https://github.com/louislam/uptime-kuma">louislam/uptime-kuma</a><br><span class="muted">92.3k★</span></td><td>Self-hosted monitoring with Push (heartbeat), DNS and TCP monitors. An SMTP monitor arrived in 2.0 beta (from a search summary, unverified).</td><td>The backup job and the canary each push a heartbeat; a missing one raises the alert.</td></tr>
+<tr><td>bjoernramos's Mail E2E Exporter, cherti/mailexporter</td><td>Send a message over SMTP, confirm it arrives over IMAP or in a Maildir, export the result to Prometheus.</td><td>Ready-made versions of part 10's canary. Only an end-to-end check catches a Worker or tunnel outage.</td></tr>
+<tr><td><a href="https://github.com/robbeverhelst/resend-exporter">robbeverhelst/resend-exporter</a><br><span class="muted">2★</span></td><td>Turns Resend webhook events (bounced, complained, delivered) into Prometheus metrics.</td><td>Bounces from the outbound side become visible without logging in to Resend.</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="relays">
+<h2><span class="num">5.</span> Sending services other people use</h2>
+<p>Free tiers as published on 12 October 2026. A second relay can sit beside Resend in Stalwart's outbound strategy, chosen by sender or used when Resend hits its cap.</p>
+<table>
+<thead><tr><th>Service</th><th>Free tier</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Resend (current)</td><td>100 a day, 3,000 a month</td><td>3 domains, 30-day log retention, SMTP included</td></tr>
+<tr><td>Mailjet</td><td>200 a day, 6,000 a month</td><td>SMTP included; branding on free sends cannot be removed</td></tr>
+<tr><td>Brevo</td><td>About 300 a day</td><td>Unverified: from search results, the pricing page did not load. Shared with campaigns; SMTP available; branding on free sends</td></tr>
+<tr><td>SMTP2GO</td><td>1,000 a month</td><td>Daily cap unverified (help page refused the request)</td></tr>
+<tr><td>Postmark</td><td>100 a month, permanently</td><td>SMTP included, no overages</td></tr>
+<tr><td>Amazon SES</td><td>No permanent free tier</td><td>$0.10 per 1,000; new accounts get $200 credit for 6 months</td></tr>
+<tr><td>Cloudflare Email Service</td><td>3,000 a month on Workers Paid</td><td>The free plan sends only to verified addresses; no SMTP in the docs</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="ranked">
+<h2><span class="num">6.</span> What I would take, in order</h2>
+<ol>
+  <li>Disable SPF on the tunnel's listener and let DKIM and DMARC decide (part 10, section 1).</li>
+  <li>Check the auto-ban list today, set a ban period, and exempt the tunnel.</li>
+  <li>Add the <code>message.forward()</code> fallback to the Worker; later, store-and-queue through R2 and Queues as mailbridge does.</li>
+  <li>Back up by stop, copy, start, then <code>restic</code> off the VM, with a heartbeat to Uptime Kuma or healthchecks.io.</li>
+  <li>Run an end-to-end canary from outside the network that alerts when it misses.</li>
+  <li>Use <code>x-cf-spamh-score</code> as a spam signal in Sieve.</li>
+  <li>Serve MTA-STS mirroring Cloudflare's policy, and turn on Stalwart's report analysis.</li>
+  <li>If the cap or the Junk problem persists: a cheap VPS with WireGuard, HAProxy and PROXY protocol. Short of that, a second free relay (Mailjet's 200 a day is the verified next step) beside Resend.</li>
+</ol>
+</section>
+
+<section id="glossary">
+<h2>Glossary for this part</h2>
+<dl class="gloss">
+<dt>PROXY protocol</dt><dd>A one-line header a proxy sends at the start of a TCP connection naming the real client IP and port, so the server behind it sees the true sender instead of the proxy.</dd>
+<dt>Store and forward (Worker)</dt><dd>Writing each inbound message to durable storage (R2) and a queue before trying to deliver it, so delivery can be retried after an outage.</dd>
+<dt><code>x-cf-spamh-score</code></dt><dd>A header Cloudflare Email Routing adds to messages it passes to a Worker, carrying its own spam score. One of the few signals about the real sender that survives the trip.</dd>
+<dt>Heartbeat monitor</dt><dd>A check that expects a job to report in on a schedule and alerts when it goes quiet. Suits backups and canaries, which succeed silently.</dd>
+</dl>
+</section>
+
+<div class="pager">
+  <a href="11-what-you-can-do.html">← 11 · What you can do with it</a>
+  <a href="glossary.html">Glossary →</a>
+</div>
+</main>
+<footer>Part of the <a href="https://github.com/Olwethu-Dlamini/mailserver">mailserver</a> repo. Apache 2.0.</footer>
+</body>
+</html>
